@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auth_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build: .
+    container_name: auth_service
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AUTH_DATABASE_HOST=postgres
+      - AUTH_DATABASE_PORT=5432
+      - AUTH_DATABASE_USER=postgres
+      - AUTH_DATABASE_PASSWORD=postgres
+      - AUTH_DATABASE_DBNAME=auth_db
+      - AUTH_DATABASE_SSLMODE=disable
+      - AUTH_EMAIL_API_KEY=<REPLACE_ME>
+      - AUTH_EMAIL_PROVIDER=sendgrid
+      - AUTH_EMAIL_FROM_EMAIL=<REPLACE_ME>
+      - AUTH_EMAIL_FROM_NAME=<REPLACE_ME>
+      - AUTH_SERVER_APP_URL=<REPLACE_ME>
+      - AUTH_JWT_ACCESS_TOKEN_SECRET=${AUTH_JWT_ACCESS_TOKEN_SECRET:-change-this-secret-key-for-access-tokens}
+      - AUTH_JWT_REFRESH_TOKEN_SECRET=${AUTH_JWT_REFRESH_TOKEN_SECRET:-change-this-secret-key-for-refresh-tokens}
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
