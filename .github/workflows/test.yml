@@ -1,0 +1,72 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: auth_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests
+        env:
+          AUTH_DATABASE_HOST: localhost
+          AUTH_DATABASE_PORT: 5432
+          AUTH_DATABASE_USER: postgres
+          AUTH_DATABASE_PASSWORD: postgres
+          AUTH_DATABASE_DBNAME: auth_db
+          AUTH_DATABASE_SSLMODE: disable
+          AUTH_JWT_ACCESS_TOKEN_SECRET: test-access-secret-key-32-chars
+          AUTH_JWT_REFRESH_TOKEN_SECRET: test-refresh-secret-key-32-char
+          AUTH_JWT_ISSUER: auth-test
+          AUTH_EMAIL_PROVIDER: mock
+          AUTH_SERVER_APP_URL: http://localhost:8080
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Generate coverage report
+        run: go tool cover -func=coverage.out

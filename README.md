@@ -1,5 +1,11 @@
 # Auth Chassis - Reusable Authentication Service
 
+[![Tests](https://github.com/pguia/auth/actions/workflows/test.yml/badge.svg)](https://github.com/pguia/auth/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/pguia/auth/branch/main/graph/badge.svg)](https://codecov.io/gh/pguia/auth)
+[![Go Report Card](https://goreportcard.com/badge/github.com/pguia/auth)](https://goreportcard.com/report/github.com/pguia/auth)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/pguia/auth)](https://github.com/pguia/auth)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A comprehensive, production-ready authentication service built with Go and gRPC. This chassis provides a complete authentication solution that can be easily integrated into any application.
 
 ## Features
