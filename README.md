@@ -1,7 +1,7 @@
 # Auth Chassis - Reusable Authentication Service
 
 [![Tests](https://github.com/guipguia/actions/workflows/test.yml/badge.svg)](https://github.com/guipguia/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/pguia/auth/branch/main/graph/badge.svg)](https://codecov.io/gh/pguia/auth)
+[![codecov](https://codecov.io/gh/guipguia/auth/branch/main/graph/badge.svg)](https://codecov.io/gh/guipguia/auth)
 [![Go Report Card](https://goreportcard.com/badge/github.com/guipguia)](https://goreportcard.com/report/github.com/guipguia)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/pguia/auth)](https://github.com/guipguia)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
