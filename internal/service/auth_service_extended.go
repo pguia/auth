@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	authv1 "github.com/pguia/auth/api/proto/auth/v1"
-	"github.com/pguia/auth/internal/domain"
+	authv1 "github.com/guipguia/api/proto/auth/v1"
+	"github.com/guipguia/internal/domain"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

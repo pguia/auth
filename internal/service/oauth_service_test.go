@@ -3,7 +3,7 @@ package service
 import (
 	"testing"
 
-	"github.com/pguia/auth/internal/config"
+	"github.com/guipguia/internal/config"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/oauth2"
 )

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pguia/auth/internal/config"
+	"github.com/guipguia/internal/config"
 	"github.com/stretchr/testify/assert"
 )
 

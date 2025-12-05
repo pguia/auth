@@ -1,4 +1,4 @@
-module github.com/pguia/auth
+module github.com/guipguia
 
 go 1.25.1
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/pguia/auth/internal/domain"
+	"github.com/guipguia/internal/domain"
 	"gorm.io/gorm"
 )
 

@@ -8,8 +8,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	authv1 "github.com/pguia/auth/api/proto/auth/v1"
-	"github.com/pguia/auth/internal/domain"
+	authv1 "github.com/guipguia/api/proto/auth/v1"
+	"github.com/guipguia/internal/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -246,16 +246,16 @@ func TestAuthService_GetActiveSessions_Success(t *testing.T) {
 	userID := uuid.New()
 	sessions := []domain.Session{
 		{
-			ID:        uuid.New(),
-			UserID:    userID,
+			ID:         uuid.New(),
+			UserID:     userID,
 			DeviceName: "iPhone 12",
-			ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+			ExpiresAt:  time.Now().Add(7 * 24 * time.Hour),
 		},
 		{
-			ID:        uuid.New(),
-			UserID:    userID,
+			ID:         uuid.New(),
+			UserID:     userID,
 			DeviceName: "Chrome Browser",
-			ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+			ExpiresAt:  time.Now().Add(7 * 24 * time.Hour),
 		},
 	}
 

@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pguia/auth/internal/domain"
-	"github.com/pguia/auth/internal/repository"
+	"github.com/guipguia/internal/domain"
+	"github.com/guipguia/internal/repository"
 )
 
 // PasswordlessService handles passwordless authentication operations

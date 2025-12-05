@@ -2,7 +2,7 @@ package service
 
 import (
 	"github.com/google/uuid"
-	"github.com/pguia/auth/internal/domain"
+	"github.com/guipguia/internal/domain"
 	"github.com/stretchr/testify/mock"
 	"golang.org/x/oauth2"
 )

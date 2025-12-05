@@ -10,11 +10,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	authv1 "github.com/pguia/auth/api/proto/auth/v1"
-	"github.com/pguia/auth/internal/config"
-	"github.com/pguia/auth/internal/database"
-	"github.com/pguia/auth/internal/repository"
-	"github.com/pguia/auth/internal/service"
+	authv1 "github.com/guipguia/api/proto/auth/v1"
+	"github.com/guipguia/internal/config"
+	"github.com/guipguia/internal/database"
+	"github.com/guipguia/internal/repository"
+	"github.com/guipguia/internal/service"
 )
 
 func main() {
