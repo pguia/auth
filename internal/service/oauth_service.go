@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/pguia/auth/internal/config"
+	"github.com/guipguia/internal/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/facebook"
 	"golang.org/x/oauth2/github"

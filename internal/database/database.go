@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/pguia/auth/internal/config"
-	"github.com/pguia/auth/internal/domain"
+	"github.com/guipguia/internal/config"
+	"github.com/guipguia/internal/domain"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"

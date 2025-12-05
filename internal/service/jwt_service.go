@@ -6,7 +6,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/pguia/auth/internal/config"
+	"github.com/guipguia/internal/config"
 )
 
 // TokenType represents the type of JWT token

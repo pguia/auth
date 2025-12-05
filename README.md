@@ -1,9 +1,9 @@
 # Auth Chassis - Reusable Authentication Service
 
-[![Tests](https://github.com/pguia/auth/actions/workflows/test.yml/badge.svg)](https://github.com/pguia/auth/actions/workflows/test.yml)
+[![Tests](https://github.com/guipguia/actions/workflows/test.yml/badge.svg)](https://github.com/guipguia/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/pguia/auth/branch/main/graph/badge.svg)](https://codecov.io/gh/pguia/auth)
-[![Go Report Card](https://goreportcard.com/badge/github.com/pguia/auth)](https://goreportcard.com/report/github.com/pguia/auth)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/pguia/auth)](https://github.com/pguia/auth)
+[![Go Report Card](https://goreportcard.com/badge/github.com/guipguia)](https://goreportcard.com/report/github.com/guipguia)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/pguia/auth)](https://github.com/guipguia)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A comprehensive, production-ready authentication service built with Go and gRPC. This chassis provides a complete authentication solution that can be easily integrated into any application.
@@ -11,12 +11,14 @@ A comprehensive, production-ready authentication service built with Go and gRPC.
 ## Features
 
 ### Authentication Methods
+
 - **Email/Password Authentication**: Traditional email and password-based authentication with secure password hashing (bcrypt)
 - **Passwordless Authentication**: Magic link authentication via email
 - **OAuth 2.0**: Support for Google, GitHub, Facebook, Apple, Microsoft, and Discord OAuth providers
 - **Two-Factor Authentication (2FA)**: TOTP-based 2FA with QR code generation and backup codes
 
 ### Security Features
+
 - JWT-based access and refresh tokens
 - Secure password hashing with bcrypt
 - Password strength validation
@@ -26,6 +28,7 @@ A comprehensive, production-ready authentication service built with Go and gRPC.
 - 2FA with backup codes
 
 ### Additional Features
+
 - User profile management
 - Password reset flow
 - Session tracking and revocation
@@ -89,11 +92,13 @@ CREATE DATABASE auth_db;
 ### 3. Configure Environment Variables
 
 Edit `.env` file and set at minimum:
+
 - `AUTH_JWT_ACCESS_TOKEN_SECRET`: A secure random string for access tokens
 - `AUTH_JWT_REFRESH_TOKEN_SECRET`: A secure random string for refresh tokens
 - `AUTH_DATABASE_*`: Your PostgreSQL connection details
 
 Generate secure secrets:
+
 ```bash
 # Generate random secrets (on macOS/Linux)
 openssl rand -base64 32
@@ -121,6 +126,7 @@ make run
 ```
 
 The service will:
+
 - Connect to PostgreSQL
 - Run database migrations automatically
 - Start the gRPC server on `:8080`
@@ -128,6 +134,7 @@ The service will:
 ## Configuration
 
 The service can be configured using:
+
 1. Environment variables (prefixed with `AUTH_`)
 2. YAML configuration file (`config.yaml`)
 3. Default values
@@ -157,6 +164,7 @@ database:
 For development, you can leave email settings empty. Emails will be logged to console.
 
 #### Option 1: SendGrid (Recommended for Production)
+
 ```yaml
 email:
   provider: sendgrid
@@ -166,6 +174,7 @@ email:
 ```
 
 Or via environment variables:
+
 ```bash
 AUTH_EMAIL_PROVIDER=sendgrid
 AUTH_EMAIL_API_KEY=SG.your-api-key-here
@@ -174,12 +183,14 @@ AUTH_EMAIL_FROM_NAME=Your App
 ```
 
 **SendGrid Setup:**
+
 1. Sign up at [SendGrid](https://sendgrid.com/)
 2. Verify your sender email/domain
 3. Create an API key (Settings → API Keys)
 4. Add the API key to your config
 
 #### Option 2: SMTP (For Development)
+
 ```yaml
 email:
   provider: smtp
@@ -208,39 +219,46 @@ oauth:
 The service exposes the following gRPC methods:
 
 ### Authentication
+
 - `Register`: Register a new user
 - `Login`: Login with email/password
 - `RefreshToken`: Refresh access token
 - `Logout`: Logout and revoke session
 
 ### Password Management
+
 - `ChangePassword`: Change user password
 - `ForgotPassword`: Request password reset
 - `ResetPassword`: Reset password with token
 
 ### Two-Factor Authentication
+
 - `Enable2FA`: Enable 2FA for user
 - `Verify2FA`: Verify 2FA code
 - `Disable2FA`: Disable 2FA
 - `Generate2FABackupCodes`: Generate new backup codes
 
 ### Passwordless Authentication
+
 - `SendPasswordlessEmail`: Send magic link
 - `VerifyPasswordlessToken`: Verify magic link
 
 ### OAuth
+
 - `GetOAuthURL`: Get OAuth authorization URL
 - `OAuthCallback`: Handle OAuth callback
 - `LinkOAuthAccount`: Link OAuth account to user
 - `UnlinkOAuthAccount`: Unlink OAuth account
 
 ### Token & Session Management
+
 - `ValidateToken`: Validate access token
 - `RevokeToken`: Revoke token
 - `GetActiveSessions`: Get user's active sessions
 - `RevokeSession`: Revoke specific session
 
 ### User Management
+
 - `GetUserProfile`: Get user profile
 - `UpdateUserProfile`: Update user profile
 - `VerifyEmail`: Verify email address
@@ -278,6 +296,7 @@ grpcurl -plaintext -d '{
 ## Database Schema
 
 The service uses the following tables:
+
 - `users`: User accounts
 - `sessions`: User sessions
 - `otps`: One-time passwords/tokens
@@ -333,6 +352,7 @@ CMD ["./auth-server"]
 ```
 
 Build and run:
+
 ```bash
 docker build -t auth-service .
 docker run -p 8080:8080 --env-file .env auth-service
@@ -341,6 +361,7 @@ docker run -p 8080:8080 --env-file .env auth-service
 ### Environment Variables for Production
 
 Ensure these are set in production:
+
 - Use strong, unique JWT secrets
 - Enable SSL for database (`sslmode=require`)
 - Configure proper email service
