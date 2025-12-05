@@ -43,10 +43,31 @@ func main() {
 
 	log.Println("Database connection established successfully")
 
-	// Initialize repositories
+	// Initialize cache service for stateless horizontal scaling
+	cacheService, err := service.NewCacheService(&cfg.Cache)
+	if err != nil {
+		log.Fatalf("Failed to initialize cache service: %v", err)
+	}
+	defer cacheService.Close()
+
+	if cfg.Cache.Enabled {
+		log.Printf("Cache service initialized (type: %s)", cfg.Cache.Type)
+	} else {
+		log.Println("Cache disabled - running in stateless mode")
+	}
+
+	// Initialize repositories (with caching if enabled)
 	userRepo := repository.NewUserRepository(db.DB)
-	sessionRepo := repository.NewSessionRepository(db.DB)
-	otpRepo := repository.NewOTPRepository(db.DB)
+	var sessionRepo repository.SessionRepository
+	var otpRepo repository.OTPRepository
+
+	if cfg.Cache.Enabled {
+		sessionRepo = repository.NewCachedSessionRepository(db.DB, cacheService, cfg.Cache.TTLSeconds)
+		otpRepo = repository.NewCachedOTPRepository(db.DB, cacheService, cfg.Cache.TTLSeconds)
+	} else {
+		sessionRepo = repository.NewSessionRepository(db.DB)
+		otpRepo = repository.NewOTPRepository(db.DB)
+	}
 
 	// Initialize services
 	passwordService := service.NewPasswordService()

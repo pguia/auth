@@ -16,6 +16,25 @@ type Config struct {
 	JWT      JWTConfig
 	OAuth    OAuthConfig
 	Email    EmailConfig
+	Cache    CacheConfig
+}
+
+// CacheConfig holds cache configuration for stateless horizontal scaling
+type CacheConfig struct {
+	Type           string           // "none", "memory", "redis" (redis = Valkey compatible)
+	Enabled        bool             // Enable caching for sessions/OTPs
+	TTLSeconds     int              // Default TTL for cached items
+	MaxSize        int              // Max entries for memory cache
+	CleanupMinutes int              // Cleanup interval for memory cache
+	Redis          RedisCacheConfig // Redis/Valkey configuration
+}
+
+// RedisCacheConfig holds Redis/Valkey cache configuration
+type RedisCacheConfig struct {
+	Address    string // Redis/Valkey address (e.g., "localhost:6379")
+	Password   string // Redis/Valkey password (empty for no auth)
+	DB         int    // Redis/Valkey database number
+	TTLSeconds int    // TTL for cached items in Redis/Valkey
 }
 
 // ServerConfig holds server-related configuration
@@ -127,6 +146,19 @@ func Load() (*Config, error) {
 			AccessTokenExpiry:  v.GetDuration("jwt.access_token_expiry"),
 			RefreshTokenExpiry: v.GetDuration("jwt.refresh_token_expiry"),
 			Issuer:             v.GetString("jwt.issuer"),
+		},
+		Cache: CacheConfig{
+			Type:           v.GetString("cache.type"),
+			Enabled:        v.GetBool("cache.enabled"),
+			TTLSeconds:     v.GetInt("cache.ttl_seconds"),
+			MaxSize:        v.GetInt("cache.max_size"),
+			CleanupMinutes: v.GetInt("cache.cleanup_minutes"),
+			Redis: RedisCacheConfig{
+				Address:    v.GetString("cache.redis.address"),
+				Password:   v.GetString("cache.redis.password"),
+				DB:         v.GetInt("cache.redis.db"),
+				TTLSeconds: v.GetInt("cache.redis.ttl_seconds"),
+			},
 		},
 		OAuth: OAuthConfig{
 			Google: OAuthProviderConfig{
@@ -255,6 +287,19 @@ func bindEnvVariables(v *viper.Viper) {
 	v.BindEnv("email.from_email")
 	v.BindEnv("email.from_name")
 	v.BindEnv("email.api_key")
+
+	// Cache
+	v.BindEnv("cache.type")
+	v.BindEnv("cache.enabled")
+	v.BindEnv("cache.ttl_seconds")
+	v.BindEnv("cache.max_size")
+	v.BindEnv("cache.cleanup_minutes")
+
+	// Redis/Valkey Cache
+	v.BindEnv("cache.redis.address")
+	v.BindEnv("cache.redis.password")
+	v.BindEnv("cache.redis.db")
+	v.BindEnv("cache.redis.ttl_seconds")
 }
 
 // setDefaults sets default configuration values
@@ -291,6 +336,19 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("oauth.apple.scopes", []string{"email", "name"})
 	v.SetDefault("oauth.microsoft.scopes", []string{"openid", "email", "profile"})
 	v.SetDefault("oauth.discord.scopes", []string{"identify", "email"})
+
+	// Cache defaults (stateless by default for horizontal scaling)
+	v.SetDefault("cache.type", "none")        // "none", "memory", "redis" (Valkey compatible)
+	v.SetDefault("cache.enabled", false)      // Disabled by default for stateless
+	v.SetDefault("cache.ttl_seconds", 300)    // 5 minutes default TTL
+	v.SetDefault("cache.max_size", 10000)     // 10k entries for memory cache
+	v.SetDefault("cache.cleanup_minutes", 10) // Cleanup every 10 minutes
+
+	// Redis/Valkey cache defaults
+	v.SetDefault("cache.redis.address", "localhost:6379")
+	v.SetDefault("cache.redis.password", "")
+	v.SetDefault("cache.redis.db", 0)
+	v.SetDefault("cache.redis.ttl_seconds", 300)
 }
 
 // Validate checks if required configuration values are present
