@@ -6,6 +6,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/pquerna/otp v1.5.0
+	github.com/redis/go-redis/v9 v9.17.2
 	github.com/sendgrid/sendgrid-go v3.16.1+incompatible
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
@@ -20,7 +21,9 @@ require (
 require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

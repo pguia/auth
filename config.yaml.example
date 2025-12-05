@@ -79,3 +79,20 @@ email:
 
   # For SendGrid or SES provider (use api_key)
   api_key: ""
+
+# Cache Configuration (for stateless horizontal scaling)
+cache:
+  # Options: none (stateless), memory (single instance only), redis (Valkey/Redis for horizontal scaling)
+  type: none
+  enabled: false
+  ttl_seconds: 300      # Default TTL for cached items (5 minutes)
+  max_size: 10000       # Max entries for memory cache
+  cleanup_minutes: 10   # Cleanup interval for memory cache
+
+  # Redis/Valkey configuration (when type: redis)
+  # Valkey is an open-source Redis alternative (BSD-3 license)
+  redis:
+    address: localhost:6379
+    password: ""
+    db: 0
+    ttl_seconds: 300
