@@ -13,11 +13,11 @@ import (
 // OTPRepository handles database operations for OTPs
 type OTPRepository interface {
 	Create(otp *domain.OTP) error
-	GetByToken(token string) (*domain.OTP, error)
-	GetByEmailAndType(email string, otpType domain.OTPType) (*domain.OTP, error)
-	MarkAsUsed(id uuid.UUID) error
+	GetByToken(tenantID uuid.UUID, token string) (*domain.OTP, error)
+	GetByEmailAndType(tenantID uuid.UUID, email string, otpType domain.OTPType) (*domain.OTP, error)
+	MarkAsUsed(tenantID, id uuid.UUID) error
 	DeleteExpired() error
-	DeleteByUserAndType(userID uuid.UUID, otpType domain.OTPType) error
+	DeleteByUserAndType(tenantID, userID uuid.UUID, otpType domain.OTPType) error
 }
 
 type otpRepository struct {
@@ -34,10 +34,11 @@ func (r *otpRepository) Create(otp *domain.OTP) error {
 	return r.db.Create(otp).Error
 }
 
-// GetByToken retrieves an OTP by token
-func (r *otpRepository) GetByToken(token string) (*domain.OTP, error) {
+// GetByToken retrieves an OTP by token within a tenant
+func (r *otpRepository) GetByToken(tenantID uuid.UUID, token string) (*domain.OTP, error) {
 	var otp domain.OTP
-	err := r.db.First(&otp, "token = ? AND used = ? AND expires_at > ?", token, false, time.Now()).Error
+	now := time.Now()
+	err := r.db.First(&otp, "tenant_id = ? AND token = ? AND used = ? AND expires_at > ?", tenantID, token, false, now).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("otp not found or expired")
@@ -47,10 +48,11 @@ func (r *otpRepository) GetByToken(token string) (*domain.OTP, error) {
 	return &otp, nil
 }
 
-// GetByEmailAndType retrieves the latest valid OTP by email and type
-func (r *otpRepository) GetByEmailAndType(email string, otpType domain.OTPType) (*domain.OTP, error) {
+// GetByEmailAndType retrieves the latest valid OTP by email and type within a tenant
+func (r *otpRepository) GetByEmailAndType(tenantID uuid.UUID, email string, otpType domain.OTPType) (*domain.OTP, error) {
 	var otp domain.OTP
-	err := r.db.Where("email = ? AND type = ? AND used = ? AND expires_at > ?", email, otpType, false, time.Now()).
+	now := time.Now()
+	err := r.db.Where("tenant_id = ? AND email = ? AND type = ? AND used = ? AND expires_at > ?", tenantID, email, otpType, false, now).
 		Order("created_at DESC").
 		First(&otp).Error
 	if err != nil {
@@ -62,11 +64,11 @@ func (r *otpRepository) GetByEmailAndType(email string, otpType domain.OTPType) 
 	return &otp, nil
 }
 
-// MarkAsUsed marks an OTP as used
-func (r *otpRepository) MarkAsUsed(id uuid.UUID) error {
+// MarkAsUsed marks an OTP as used within a tenant
+func (r *otpRepository) MarkAsUsed(tenantID, id uuid.UUID) error {
 	now := time.Now()
 	result := r.db.Model(&domain.OTP{}).
-		Where("id = ? AND used = ?", id, false).
+		Where("tenant_id = ? AND id = ? AND used = ?", tenantID, id, false).
 		Updates(map[string]interface{}{
 			"used":    true,
 			"used_at": now,
@@ -83,12 +85,12 @@ func (r *otpRepository) MarkAsUsed(id uuid.UUID) error {
 	return nil
 }
 
-// DeleteExpired deletes expired OTPs
+// DeleteExpired deletes expired OTPs (across all tenants - maintenance task)
 func (r *otpRepository) DeleteExpired() error {
 	return r.db.Where("expires_at < ?", time.Now()).Delete(&domain.OTP{}).Error
 }
 
-// DeleteByUserAndType deletes all OTPs for a user and type
-func (r *otpRepository) DeleteByUserAndType(userID uuid.UUID, otpType domain.OTPType) error {
-	return r.db.Where("user_id = ? AND type = ?", userID, otpType).Delete(&domain.OTP{}).Error
+// DeleteByUserAndType deletes all OTPs for a user and type within a tenant
+func (r *otpRepository) DeleteByUserAndType(tenantID, userID uuid.UUID, otpType domain.OTPType) error {
+	return r.db.Where("tenant_id = ? AND user_id = ? AND type = ?", tenantID, userID, otpType).Delete(&domain.OTP{}).Error
 }

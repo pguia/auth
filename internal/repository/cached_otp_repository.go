@@ -27,13 +27,13 @@ func NewCachedOTPRepository(db *gorm.DB, cache CacheService, ttlSeconds int) OTP
 }
 
 // otpTokenCacheKey generates a cache key for an OTP by token
-func otpTokenCacheKey(token string) string {
-	return fmt.Sprintf("auth:otp:token:%s", token)
+func otpTokenCacheKey(tenantID uuid.UUID, token string) string {
+	return fmt.Sprintf("auth:otp:tenant:%s:token:%s", tenantID.String(), token)
 }
 
 // otpEmailTypeCacheKey generates a cache key for an OTP by email and type
-func otpEmailTypeCacheKey(email string, otpType domain.OTPType) string {
-	return fmt.Sprintf("auth:otp:email:%s:type:%s", email, otpType)
+func otpEmailTypeCacheKey(tenantID uuid.UUID, email string, otpType domain.OTPType) string {
+	return fmt.Sprintf("auth:otp:tenant:%s:email:%s:type:%s", tenantID.String(), email, otpType)
 }
 
 // Create creates a new OTP and caches it
@@ -50,8 +50,8 @@ func (r *cachedOTPRepository) Create(otp *domain.OTP) error {
 }
 
 // GetByToken retrieves an OTP by token with caching
-func (r *cachedOTPRepository) GetByToken(token string) (*domain.OTP, error) {
-	cacheKey := otpTokenCacheKey(token)
+func (r *cachedOTPRepository) GetByToken(tenantID uuid.UUID, token string) (*domain.OTP, error) {
+	cacheKey := otpTokenCacheKey(tenantID, token)
 
 	// Try cache first
 	if cached, ok := r.cache.Get(cacheKey); ok {
@@ -61,7 +61,7 @@ func (r *cachedOTPRepository) GetByToken(token string) (*domain.OTP, error) {
 	}
 
 	// Cache miss - get from database
-	otp, err := r.repo.GetByToken(token)
+	otp, err := r.repo.GetByToken(tenantID, token)
 	if err != nil {
 		return nil, err
 	}
@@ -73,8 +73,8 @@ func (r *cachedOTPRepository) GetByToken(token string) (*domain.OTP, error) {
 }
 
 // GetByEmailAndType retrieves the latest valid OTP by email and type with caching
-func (r *cachedOTPRepository) GetByEmailAndType(email string, otpType domain.OTPType) (*domain.OTP, error) {
-	cacheKey := otpEmailTypeCacheKey(email, otpType)
+func (r *cachedOTPRepository) GetByEmailAndType(tenantID uuid.UUID, email string, otpType domain.OTPType) (*domain.OTP, error) {
+	cacheKey := otpEmailTypeCacheKey(tenantID, email, otpType)
 
 	// Try cache first
 	if cached, ok := r.cache.Get(cacheKey); ok {
@@ -84,7 +84,7 @@ func (r *cachedOTPRepository) GetByEmailAndType(email string, otpType domain.OTP
 	}
 
 	// Cache miss - get from database
-	otp, err := r.repo.GetByEmailAndType(email, otpType)
+	otp, err := r.repo.GetByEmailAndType(tenantID, email, otpType)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +96,8 @@ func (r *cachedOTPRepository) GetByEmailAndType(email string, otpType domain.OTP
 }
 
 // MarkAsUsed marks an OTP as used and invalidates cache
-func (r *cachedOTPRepository) MarkAsUsed(id uuid.UUID) error {
-	// Get OTP first to invalidate caches
-	// We need to find it by iterating or querying by ID
-	// For simplicity, we'll just delete known cache patterns after marking
-
-	err := r.repo.MarkAsUsed(id)
+func (r *cachedOTPRepository) MarkAsUsed(tenantID, id uuid.UUID) error {
+	err := r.repo.MarkAsUsed(tenantID, id)
 	if err != nil {
 		return err
 	}
@@ -117,9 +113,9 @@ func (r *cachedOTPRepository) DeleteExpired() error {
 	return r.repo.DeleteExpired()
 }
 
-// DeleteByUserAndType deletes all OTPs for a user and type
-func (r *cachedOTPRepository) DeleteByUserAndType(userID uuid.UUID, otpType domain.OTPType) error {
-	return r.repo.DeleteByUserAndType(userID, otpType)
+// DeleteByUserAndType deletes all OTPs for a user and type within a tenant
+func (r *cachedOTPRepository) DeleteByUserAndType(tenantID, userID uuid.UUID, otpType domain.OTPType) error {
+	return r.repo.DeleteByUserAndType(tenantID, userID, otpType)
 }
 
 // cacheOTP caches an OTP under multiple keys
@@ -138,15 +134,15 @@ func (r *cachedOTPRepository) cacheOTP(otp *domain.OTP) {
 		ttl = r.ttl
 	}
 
-	r.cache.SetWithTTL(otpTokenCacheKey(otp.Token), string(data), ttl)
-	r.cache.SetWithTTL(otpEmailTypeCacheKey(otp.Email, otp.Type), string(data), ttl)
+	r.cache.SetWithTTL(otpTokenCacheKey(otp.TenantID, otp.Token), string(data), ttl)
+	r.cache.SetWithTTL(otpEmailTypeCacheKey(otp.TenantID, otp.Email, otp.Type), string(data), ttl)
 }
 
 // InvalidateOTPCache removes all cache entries for an OTP
 // This should be called by the service layer after marking an OTP as used
 func (r *cachedOTPRepository) InvalidateOTPCache(otp *domain.OTP) {
-	r.cache.Delete(otpTokenCacheKey(otp.Token))
-	r.cache.Delete(otpEmailTypeCacheKey(otp.Email, otp.Type))
+	r.cache.Delete(otpTokenCacheKey(otp.TenantID, otp.Token))
+	r.cache.Delete(otpEmailTypeCacheKey(otp.TenantID, otp.Email, otp.Type))
 }
 
 // unmarshalOTP unmarshals a cached OTP

@@ -13,6 +13,12 @@ import (
 
 // GetOAuthURL generates an OAuth authorization URL
 func (s *AuthService) GetOAuthURL(ctx context.Context, req *authv1.GetOAuthURLRequest) (*authv1.GetOAuthURLResponse, error) {
+	// Extract tenant ID from context (for audit logging)
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	provider := s.protoToOAuthProvider(req.Provider)
 
 	// Generate state for CSRF protection
@@ -27,6 +33,12 @@ func (s *AuthService) GetOAuthURL(ctx context.Context, req *authv1.GetOAuthURLRe
 		return nil, fmt.Errorf("failed to generate OAuth URL: %w", err)
 	}
 
+	// Audit log OAuth flow initiated
+	s.auditService.LogAction(ctx, tenantID, domain.AuditActionOAuthLogin, domain.AuditResourceUser, "", domain.AuditStatusSuccess, map[string]interface{}{
+		"provider": string(provider),
+		"state":    state,
+	})
+
 	return &authv1.GetOAuthURLResponse{
 		AuthUrl: authURL,
 		State:   state,
@@ -35,32 +47,48 @@ func (s *AuthService) GetOAuthURL(ctx context.Context, req *authv1.GetOAuthURLRe
 
 // OAuthCallback handles OAuth callback
 func (s *AuthService) OAuthCallback(ctx context.Context, req *authv1.OAuthCallbackRequest) (*authv1.OAuthCallbackResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
+	ipAddress := IPAddressFromContext(ctx)
 	provider := s.protoToOAuthProvider(req.Provider)
 
 	// Exchange code for token
 	token, err := s.oauthService.ExchangeCode(provider, req.Code)
 	if err != nil {
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionOAuthLogin, domain.AuditResourceUser, "", domain.AuditStatusFailure, map[string]interface{}{
+			"provider": string(provider),
+			"reason":   "code_exchange_failed",
+		})
 		return nil, fmt.Errorf("failed to exchange code: %w", err)
 	}
 
 	// Get user info from provider
 	userInfo, err := s.oauthService.GetUserInfo(provider, token)
 	if err != nil {
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionOAuthLogin, domain.AuditResourceUser, "", domain.AuditStatusFailure, map[string]interface{}{
+			"provider": string(provider),
+			"reason":   "user_info_failed",
+		})
 		return nil, fmt.Errorf("failed to get user info: %w", err)
 	}
 
-	// Check if OAuth account already exists
-	oauthAccount, err := s.userRepo.GetOAuthAccount(string(provider), userInfo.ProviderUserID)
+	// Check if OAuth account already exists within tenant
+	oauthAccount, err := s.userRepo.GetOAuthAccount(tenantID, string(provider), userInfo.ProviderUserID)
 
 	var user *domain.User
 	isNewUser := false
 
 	if err != nil {
-		// OAuth account doesn't exist, check if user exists by email
-		user, err = s.userRepo.GetByEmail(userInfo.Email)
+		// OAuth account doesn't exist, check if user exists by email within tenant
+		user, err = s.userRepo.GetByEmail(tenantID, userInfo.Email)
 		if err != nil {
-			// Create new user
+			// Create new user with tenant ID
 			user = &domain.User{
+				TenantID:      tenantID,
 				Email:         userInfo.Email,
 				FirstName:     userInfo.FirstName,
 				LastName:      userInfo.LastName,
@@ -72,10 +100,17 @@ func (s *AuthService) OAuthCallback(ctx context.Context, req *authv1.OAuthCallba
 			}
 
 			isNewUser = true
+
+			// Audit log new user registration via OAuth
+			s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionRegister, domain.AuditStatusSuccess, map[string]interface{}{
+				"method":   "oauth",
+				"provider": string(provider),
+			})
 		}
 
-		// Create OAuth account link
+		// Create OAuth account link with tenant ID
 		oauthAccount = &domain.OAuthAccount{
+			TenantID:       tenantID,
 			UserID:         user.ID,
 			Provider:       string(provider),
 			ProviderUserID: userInfo.ProviderUserID,
@@ -91,16 +126,23 @@ func (s *AuthService) OAuthCallback(ctx context.Context, req *authv1.OAuthCallba
 		if err := s.userRepo.CreateOAuthAccount(oauthAccount); err != nil {
 			return nil, fmt.Errorf("failed to create OAuth account: %w", err)
 		}
+
+		// Audit log OAuth account linked
+		s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionOAuthLink, domain.AuditStatusSuccess, map[string]interface{}{
+			"provider": string(provider),
+		})
 	} else {
-		// OAuth account exists, get the user
-		user, err = s.userRepo.GetByID(oauthAccount.UserID)
+		// OAuth account exists, get the user within tenant
+		user, err = s.userRepo.GetByID(tenantID, oauthAccount.UserID)
 		if err != nil {
 			return nil, fmt.Errorf("user not found")
 		}
 	}
 
-	// Generate JWT tokens
-	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, nil)
+	// Generate JWT tokens with tenant ID
+	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, map[string]string{
+		"tenant_id": tenantID.String(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
@@ -110,13 +152,19 @@ func (s *AuthService) OAuthCallback(ctx context.Context, req *authv1.OAuthCallba
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
-	// Create session
+	// Create session with tenant ID and idle timeout
+	now := time.Now()
 	session := &domain.Session{
-		UserID:       user.ID,
-		RefreshToken: refreshToken,
-		DeviceID:     req.DeviceId,
-		DeviceName:   req.DeviceName,
-		ExpiresAt:    time.Now().Add(7 * 24 * time.Hour),
+		TenantID:       tenantID,
+		UserID:         user.ID,
+		RefreshToken:   refreshToken,
+		DeviceID:       req.DeviceId,
+		DeviceName:     req.DeviceName,
+		IPAddress:      ipAddress,
+		UserAgent:      UserAgentFromContext(ctx),
+		ExpiresAt:      now.Add(s.sessionConfig.SessionExpiry),
+		IdleTimeoutAt:  ptrTime(now.Add(s.sessionConfig.IdleTimeout)),
+		LastAccessedAt: now,
 	}
 
 	if err := s.sessionRepo.Create(session); err != nil {
@@ -124,9 +172,16 @@ func (s *AuthService) OAuthCallback(ctx context.Context, req *authv1.OAuthCallba
 	}
 
 	// Update last login
-	if err := s.userRepo.UpdateLastLogin(user.ID); err != nil {
+	if err := s.userRepo.UpdateLastLogin(tenantID, user.ID); err != nil {
 		fmt.Printf("Failed to update last login: %v\n", err)
 	}
+
+	// Audit log OAuth login
+	s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionOAuthLogin, domain.AuditStatusSuccess, map[string]interface{}{
+		"provider":   string(provider),
+		"session_id": session.ID.String(),
+		"is_new":     isNewUser,
+	})
 
 	return &authv1.OAuthCallbackResponse{
 		AccessToken:  accessToken,
@@ -140,6 +195,12 @@ func (s *AuthService) OAuthCallback(ctx context.Context, req *authv1.OAuthCallba
 
 // LinkOAuthAccount links an OAuth account to an existing user
 func (s *AuthService) LinkOAuthAccount(ctx context.Context, req *authv1.LinkOAuthAccountRequest) (*authv1.LinkOAuthAccountResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
@@ -159,8 +220,9 @@ func (s *AuthService) LinkOAuthAccount(ctx context.Context, req *authv1.LinkOAut
 		return nil, fmt.Errorf("failed to get user info: %w", err)
 	}
 
-	// Create OAuth account link
+	// Create OAuth account link with tenant ID
 	oauthAccount := &domain.OAuthAccount{
+		TenantID:       tenantID,
 		UserID:         userID,
 		Provider:       string(provider),
 		ProviderUserID: userInfo.ProviderUserID,
@@ -177,6 +239,11 @@ func (s *AuthService) LinkOAuthAccount(ctx context.Context, req *authv1.LinkOAut
 		return nil, fmt.Errorf("failed to link OAuth account: %w", err)
 	}
 
+	// Audit log OAuth account linked
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionOAuthLink, domain.AuditStatusSuccess, map[string]interface{}{
+		"provider": string(provider),
+	})
+
 	return &authv1.LinkOAuthAccountResponse{
 		Success: true,
 		Message: "OAuth account linked successfully",
@@ -191,6 +258,12 @@ func (s *AuthService) LinkOAuthAccount(ctx context.Context, req *authv1.LinkOAut
 
 // UnlinkOAuthAccount unlinks an OAuth account from a user
 func (s *AuthService) UnlinkOAuthAccount(ctx context.Context, req *authv1.UnlinkOAuthAccountRequest) (*authv1.UnlinkOAuthAccountResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
@@ -198,9 +271,14 @@ func (s *AuthService) UnlinkOAuthAccount(ctx context.Context, req *authv1.Unlink
 
 	provider := s.protoToOAuthProvider(req.Provider)
 
-	if err := s.userRepo.DeleteOAuthAccount(userID, string(provider)); err != nil {
+	if err := s.userRepo.DeleteOAuthAccount(tenantID, userID, string(provider)); err != nil {
 		return nil, fmt.Errorf("failed to unlink OAuth account: %w", err)
 	}
+
+	// Audit log OAuth account unlinked
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionOAuthUnlink, domain.AuditStatusSuccess, map[string]interface{}{
+		"provider": string(provider),
+	})
 
 	return &authv1.UnlinkOAuthAccountResponse{
 		Success: true,
@@ -227,23 +305,32 @@ func (s *AuthService) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 		Valid:     true,
 		UserId:    claims.UserID,
 		Email:     claims.Email,
-		Claims:    claimsMap,
+		Claims:    claimsMap, // tenant_id is included in claims
 		ExpiresAt: timestamppb.New(claims.ExpiresAt.Time),
 	}, nil
 }
 
 // RevokeToken revokes a token
 func (s *AuthService) RevokeToken(ctx context.Context, req *authv1.RevokeTokenRequest) (*authv1.RevokeTokenResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	// For refresh tokens, revoke the session
 	if req.TokenType == authv1.TokenType_TOKEN_TYPE_REFRESH {
-		session, err := s.sessionRepo.GetByRefreshToken(req.Token)
+		session, err := s.sessionRepo.GetByRefreshToken(tenantID, req.Token)
 		if err != nil {
 			return nil, fmt.Errorf("session not found")
 		}
 
-		if err := s.sessionRepo.Revoke(session.ID); err != nil {
+		if err := s.sessionRepo.Revoke(tenantID, session.ID); err != nil {
 			return nil, fmt.Errorf("failed to revoke session: %w", err)
 		}
+
+		// Audit log token revocation
+		s.auditService.LogSessionAction(ctx, tenantID, session.ID, session.UserID, domain.AuditActionTokenRevoke, domain.AuditStatusSuccess, nil)
 
 		return &authv1.RevokeTokenResponse{
 			Success: true,
@@ -261,12 +348,18 @@ func (s *AuthService) RevokeToken(ctx context.Context, req *authv1.RevokeTokenRe
 
 // GetActiveSessions retrieves all active sessions for a user
 func (s *AuthService) GetActiveSessions(ctx context.Context, req *authv1.GetActiveSessionsRequest) (*authv1.GetActiveSessionsResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
-	sessions, err := s.sessionRepo.GetActiveSessions(userID)
+	sessions, err := s.sessionRepo.GetActiveSessions(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sessions: %w", err)
 	}
@@ -293,13 +386,19 @@ func (s *AuthService) GetActiveSessions(ctx context.Context, req *authv1.GetActi
 
 // RevokeSession revokes a specific session
 func (s *AuthService) RevokeSession(ctx context.Context, req *authv1.RevokeSessionRequest) (*authv1.RevokeSessionResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	sessionID, err := uuid.Parse(req.SessionId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid session ID")
 	}
 
-	// Verify session belongs to user
-	session, err := s.sessionRepo.GetByID(sessionID)
+	// Verify session belongs to user within tenant
+	session, err := s.sessionRepo.GetByID(tenantID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found")
 	}
@@ -308,9 +407,12 @@ func (s *AuthService) RevokeSession(ctx context.Context, req *authv1.RevokeSessi
 		return nil, fmt.Errorf("unauthorized")
 	}
 
-	if err := s.sessionRepo.Revoke(sessionID); err != nil {
+	if err := s.sessionRepo.Revoke(tenantID, sessionID); err != nil {
 		return nil, fmt.Errorf("failed to revoke session: %w", err)
 	}
+
+	// Audit log session revocation
+	s.auditService.LogSessionAction(ctx, tenantID, sessionID, session.UserID, domain.AuditActionSessionRevoke, domain.AuditStatusSuccess, nil)
 
 	return &authv1.RevokeSessionResponse{
 		Success: true,
@@ -320,12 +422,18 @@ func (s *AuthService) RevokeSession(ctx context.Context, req *authv1.RevokeSessi
 
 // GetUserProfile retrieves a user's profile
 func (s *AuthService) GetUserProfile(ctx context.Context, req *authv1.GetUserProfileRequest) (*authv1.GetUserProfileResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -337,12 +445,18 @@ func (s *AuthService) GetUserProfile(ctx context.Context, req *authv1.GetUserPro
 
 // UpdateUserProfile updates a user's profile
 func (s *AuthService) UpdateUserProfile(ctx context.Context, req *authv1.UpdateUserProfileRequest) (*authv1.UpdateUserProfileResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -365,6 +479,9 @@ func (s *AuthService) UpdateUserProfile(ctx context.Context, req *authv1.UpdateU
 		return nil, fmt.Errorf("failed to update user: %w", err)
 	}
 
+	// Audit log profile update
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionProfileUpdate, domain.AuditStatusSuccess, nil)
+
 	return &authv1.UpdateUserProfileResponse{
 		User: s.userToProto(user),
 	}, nil
@@ -372,8 +489,14 @@ func (s *AuthService) UpdateUserProfile(ctx context.Context, req *authv1.UpdateU
 
 // VerifyEmail verifies a user's email
 func (s *AuthService) VerifyEmail(ctx context.Context, req *authv1.VerifyEmailRequest) (*authv1.VerifyEmailResponse, error) {
-	// Get OTP by token
-	otp, err := s.otpRepo.GetByToken(req.Token)
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
+	// Get OTP by token within tenant
+	otp, err := s.otpRepo.GetByToken(tenantID, req.Token)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or expired token")
 	}
@@ -383,14 +506,17 @@ func (s *AuthService) VerifyEmail(ctx context.Context, req *authv1.VerifyEmailRe
 	}
 
 	// Verify email
-	if err := s.userRepo.VerifyEmail(otp.UserID); err != nil {
+	if err := s.userRepo.VerifyEmail(tenantID, otp.UserID); err != nil {
 		return nil, fmt.Errorf("failed to verify email: %w", err)
 	}
 
 	// Mark token as used
-	if err := s.otpRepo.MarkAsUsed(otp.ID); err != nil {
+	if err := s.otpRepo.MarkAsUsed(tenantID, otp.ID); err != nil {
 		fmt.Printf("Failed to mark token as used: %v\n", err)
 	}
+
+	// Audit log email verification
+	s.auditService.LogUserAction(ctx, tenantID, otp.UserID, nil, domain.AuditActionEmailVerify, domain.AuditStatusSuccess, nil)
 
 	return &authv1.VerifyEmailResponse{
 		Success: true,
@@ -400,8 +526,14 @@ func (s *AuthService) VerifyEmail(ctx context.Context, req *authv1.VerifyEmailRe
 
 // ResendVerificationEmail resends the verification email
 func (s *AuthService) ResendVerificationEmail(ctx context.Context, req *authv1.ResendVerificationEmailRequest) (*authv1.ResendVerificationEmailResponse, error) {
-	// Get user
-	user, err := s.userRepo.GetByEmail(req.Email)
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
+	// Get user within tenant
+	user, err := s.userRepo.GetByEmail(tenantID, req.Email)
 	if err != nil {
 		// Don't reveal if user exists
 		return &authv1.ResendVerificationEmailResponse{
@@ -418,8 +550,8 @@ func (s *AuthService) ResendVerificationEmail(ctx context.Context, req *authv1.R
 		}, nil
 	}
 
-	// Generate new verification token
-	verificationToken, err := GenerateEmailVerificationToken(user.Email, user.ID, s.otpRepo)
+	// Generate new verification token with tenant ID
+	verificationToken, err := GenerateEmailVerificationToken(tenantID, user.Email, user.ID, s.otpRepo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate verification token: %w", err)
 	}

@@ -20,10 +20,11 @@ const (
 // OTP represents a one-time password/token
 type OTP struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	TenantID  uuid.UUID      `gorm:"type:uuid;not null;index:idx_otp_tenant_email_type" json:"tenant_id"`
 	UserID    uuid.UUID      `gorm:"type:uuid;index" json:"user_id"` // May be null for email verification before registration
-	Email     string         `gorm:"index;not null" json:"email"`
-	Token     string         `gorm:"uniqueIndex;not null" json:"token"`
-	Type      OTPType        `gorm:"type:varchar(50);not null;index" json:"type"`
+	Email     string         `gorm:"not null;index:idx_otp_tenant_email_type" json:"email"`
+	Token     string         `gorm:"uniqueIndex:idx_otp_tenant_token,unique;not null" json:"token"`
+	Type      OTPType        `gorm:"type:varchar(50);not null;index:idx_otp_tenant_email_type" json:"type"`
 	Code      string         `json:"code,omitempty"` // Optional numeric code (for 2FA, etc.)
 	Used      bool           `gorm:"default:false;index" json:"used"`
 	UsedAt    *time.Time     `gorm:"column:used_at" json:"used_at,omitempty"`

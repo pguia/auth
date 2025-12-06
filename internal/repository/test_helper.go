@@ -47,18 +47,23 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	})
 	assert.NoError(t, err)
 
-	// Auto migrate the schema
+	// Drop existing tables to ensure clean schema migration
+	db.Exec("DROP TABLE IF EXISTS audit_logs, account_lockouts, login_attempts, password_histories, oauth_accounts, backup_codes, otps, sessions, users, tenants CASCADE")
+
+	// Auto migrate the schema with all domain models including new tenant-aware ones
 	err = db.AutoMigrate(
+		&domain.Tenant{},
 		&domain.User{},
 		&domain.Session{},
 		&domain.OTP{},
 		&domain.BackupCode{},
 		&domain.OAuthAccount{},
+		&domain.AuditLog{},
+		&domain.LoginAttempt{},
+		&domain.AccountLockout{},
+		&domain.PasswordHistory{},
 	)
 	assert.NoError(t, err)
-
-	// Clean up tables before each test
-	db.Exec("TRUNCATE TABLE users, sessions, otps, backup_codes, oauth_accounts CASCADE")
 
 	return db
 }

@@ -13,8 +13,8 @@ import (
 
 // PasswordlessService handles passwordless authentication operations
 type PasswordlessService interface {
-	GenerateToken(email string) (*domain.OTP, error)
-	VerifyToken(token string) (*domain.OTP, error)
+	GenerateToken(tenantID uuid.UUID, email string) (*domain.OTP, error)
+	VerifyToken(tenantID uuid.UUID, token string) (*domain.OTP, error)
 }
 
 type passwordlessService struct {
@@ -33,15 +33,16 @@ func NewPasswordlessService(otpRepo repository.OTPRepository) PasswordlessServic
 }
 
 // GenerateToken generates a passwordless login token
-func (s *passwordlessService) GenerateToken(email string) (*domain.OTP, error) {
+func (s *passwordlessService) GenerateToken(tenantID uuid.UUID, email string) (*domain.OTP, error) {
 	// Generate secure random token
 	token, err := s.generateSecureToken()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate token: %w", err)
 	}
 
-	// Create OTP record
+	// Create OTP record with tenant ID
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		Email:     email,
 		Token:     token,
 		Type:      domain.OTPTypePasswordless,
@@ -56,8 +57,8 @@ func (s *passwordlessService) GenerateToken(email string) (*domain.OTP, error) {
 }
 
 // VerifyToken verifies a passwordless login token
-func (s *passwordlessService) VerifyToken(token string) (*domain.OTP, error) {
-	otp, err := s.otpRepo.GetByToken(token)
+func (s *passwordlessService) VerifyToken(tenantID uuid.UUID, token string) (*domain.OTP, error) {
+	otp, err := s.otpRepo.GetByToken(tenantID, token)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or expired token: %w", err)
 	}
@@ -71,7 +72,7 @@ func (s *passwordlessService) VerifyToken(token string) (*domain.OTP, error) {
 	}
 
 	// Mark token as used
-	if err := s.otpRepo.MarkAsUsed(otp.ID); err != nil {
+	if err := s.otpRepo.MarkAsUsed(tenantID, otp.ID); err != nil {
 		return nil, fmt.Errorf("failed to mark token as used: %w", err)
 	}
 
@@ -89,7 +90,7 @@ func (s *passwordlessService) generateSecureToken() (string, error) {
 }
 
 // GenerateEmailVerificationToken generates an email verification token
-func GenerateEmailVerificationToken(email string, userID uuid.UUID, otpRepo repository.OTPRepository) (*domain.OTP, error) {
+func GenerateEmailVerificationToken(tenantID uuid.UUID, email string, userID uuid.UUID, otpRepo repository.OTPRepository) (*domain.OTP, error) {
 	// Generate secure random token
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -97,8 +98,9 @@ func GenerateEmailVerificationToken(email string, userID uuid.UUID, otpRepo repo
 	}
 	token := base64.URLEncoding.EncodeToString(bytes)
 
-	// Create OTP record
+	// Create OTP record with tenant ID
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Email:     email,
 		Token:     token,
@@ -114,7 +116,7 @@ func GenerateEmailVerificationToken(email string, userID uuid.UUID, otpRepo repo
 }
 
 // GeneratePasswordResetToken generates a password reset token
-func GeneratePasswordResetToken(email string, userID uuid.UUID, otpRepo repository.OTPRepository) (*domain.OTP, error) {
+func GeneratePasswordResetToken(tenantID uuid.UUID, email string, userID uuid.UUID, otpRepo repository.OTPRepository) (*domain.OTP, error) {
 	// Generate secure random token
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -122,8 +124,9 @@ func GeneratePasswordResetToken(email string, userID uuid.UUID, otpRepo reposito
 	}
 	token := base64.URLEncoding.EncodeToString(bytes)
 
-	// Create OTP record
+	// Create OTP record with tenant ID
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Email:     email,
 		Token:     token,

@@ -69,6 +69,12 @@ func main() {
 		otpRepo = repository.NewOTPRepository(db.DB)
 	}
 
+	// Initialize compliance repositories
+	auditLogRepo := repository.NewAuditLogRepository(db.DB)
+	loginAttemptRepo := repository.NewLoginAttemptRepository(db.DB)
+	lockoutRepo := repository.NewAccountLockoutRepository(db.DB)
+	passwordHistoryRepo := repository.NewPasswordHistoryRepository(db.DB)
+
 	// Initialize services
 	passwordService := service.NewPasswordService()
 	totpService := service.NewTOTPService()
@@ -76,6 +82,25 @@ func main() {
 	oauthService := service.NewOAuthService(&cfg.OAuth)
 	jwtService := service.NewJWTService(&cfg.JWT)
 	emailService := service.NewEmailService(&cfg.Email, cfg.Server.AppURL)
+
+	// Initialize compliance services
+	auditService := service.NewAuditService(auditLogRepo)
+	loginProtectionService := service.NewLoginProtectionService(
+		loginAttemptRepo,
+		lockoutRepo,
+		userRepo,
+		service.DefaultLoginProtectionConfig(),
+	)
+	passwordHistoryService := service.NewPasswordHistoryService(
+		passwordHistoryRepo,
+		service.DefaultPasswordHistoryConfig(),
+	)
+
+	// Session configuration for compliance (HIPAA: 15 min idle timeout)
+	sessionConfig := service.SessionConfig{
+		IdleTimeout:           15 * 60, // 15 minutes in seconds
+		MaxConcurrentSessions: 5,       // Limit concurrent sessions
+	}
 
 	// Initialize auth service
 	authService := service.NewAuthService(
@@ -88,6 +113,10 @@ func main() {
 		oauthService,
 		jwtService,
 		emailService,
+		auditService,
+		loginProtectionService,
+		passwordHistoryService,
+		sessionConfig,
 	)
 
 	// Create gRPC server
