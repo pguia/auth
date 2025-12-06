@@ -13,14 +13,19 @@ import (
 // SessionRepository handles database operations for sessions
 type SessionRepository interface {
 	Create(session *domain.Session) error
-	GetByID(id uuid.UUID) (*domain.Session, error)
-	GetByRefreshToken(token string) (*domain.Session, error)
-	GetActiveSessions(userID uuid.UUID) ([]domain.Session, error)
+	GetByID(tenantID, id uuid.UUID) (*domain.Session, error)
+	GetByRefreshToken(tenantID uuid.UUID, token string) (*domain.Session, error)
+	GetActiveSessions(tenantID, userID uuid.UUID) ([]domain.Session, error)
+	CountActiveSessions(tenantID, userID uuid.UUID) (int64, error)
 	Update(session *domain.Session) error
-	Revoke(sessionID uuid.UUID) error
-	RevokeAllUserSessions(userID uuid.UUID) error
+	Revoke(tenantID, sessionID uuid.UUID) error
+	RevokeAllUserSessions(tenantID, userID uuid.UUID) error
 	DeleteExpired() error
-	UpdateLastAccessed(sessionID uuid.UUID) error
+	UpdateLastAccessed(tenantID, sessionID uuid.UUID) error
+	// Compliance methods
+	UpdateIdleTimeout(tenantID, sessionID uuid.UUID, timeout time.Time) error
+	GetIdleTimedOutSessions(tenantID uuid.UUID) ([]domain.Session, error)
+	RevokeIdleTimedOut(tenantID uuid.UUID) (int64, error)
 }
 
 type sessionRepository struct {
@@ -37,10 +42,10 @@ func (r *sessionRepository) Create(session *domain.Session) error {
 	return r.db.Create(session).Error
 }
 
-// GetByID retrieves a session by ID
-func (r *sessionRepository) GetByID(id uuid.UUID) (*domain.Session, error) {
+// GetByID retrieves a session by ID within a tenant
+func (r *sessionRepository) GetByID(tenantID, id uuid.UUID) (*domain.Session, error) {
 	var session domain.Session
-	err := r.db.First(&session, "id = ?", id).Error
+	err := r.db.First(&session, "tenant_id = ? AND id = ?", tenantID, id).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("session not found")
@@ -50,10 +55,10 @@ func (r *sessionRepository) GetByID(id uuid.UUID) (*domain.Session, error) {
 	return &session, nil
 }
 
-// GetByRefreshToken retrieves a session by refresh token
-func (r *sessionRepository) GetByRefreshToken(token string) (*domain.Session, error) {
+// GetByRefreshToken retrieves a session by refresh token within a tenant
+func (r *sessionRepository) GetByRefreshToken(tenantID uuid.UUID, token string) (*domain.Session, error) {
 	var session domain.Session
-	err := r.db.First(&session, "refresh_token = ?", token).Error
+	err := r.db.First(&session, "tenant_id = ? AND refresh_token = ?", tenantID, token).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("session not found")
@@ -63,13 +68,24 @@ func (r *sessionRepository) GetByRefreshToken(token string) (*domain.Session, er
 	return &session, nil
 }
 
-// GetActiveSessions retrieves all active sessions for a user
-func (r *sessionRepository) GetActiveSessions(userID uuid.UUID) ([]domain.Session, error) {
+// GetActiveSessions retrieves all active sessions for a user within a tenant
+func (r *sessionRepository) GetActiveSessions(tenantID, userID uuid.UUID) ([]domain.Session, error) {
 	var sessions []domain.Session
-	err := r.db.Where("user_id = ? AND revoked_at IS NULL AND expires_at > ?", userID, time.Now()).
+	now := time.Now()
+	err := r.db.Where("tenant_id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?", tenantID, userID, now).
 		Order("last_accessed_at DESC").
 		Find(&sessions).Error
 	return sessions, err
+}
+
+// CountActiveSessions counts active sessions for a user within a tenant
+func (r *sessionRepository) CountActiveSessions(tenantID, userID uuid.UUID) (int64, error) {
+	var count int64
+	now := time.Now()
+	err := r.db.Model(&domain.Session{}).
+		Where("tenant_id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?", tenantID, userID, now).
+		Count(&count).Error
+	return count, err
 }
 
 // Update updates a session
@@ -77,11 +93,11 @@ func (r *sessionRepository) Update(session *domain.Session) error {
 	return r.db.Save(session).Error
 }
 
-// Revoke revokes a session
-func (r *sessionRepository) Revoke(sessionID uuid.UUID) error {
+// Revoke revokes a session within a tenant
+func (r *sessionRepository) Revoke(tenantID, sessionID uuid.UUID) error {
 	now := time.Now()
 	result := r.db.Model(&domain.Session{}).
-		Where("id = ? AND revoked_at IS NULL", sessionID).
+		Where("tenant_id = ? AND id = ? AND revoked_at IS NULL", tenantID, sessionID).
 		Update("revoked_at", now)
 
 	if result.Error != nil {
@@ -95,23 +111,48 @@ func (r *sessionRepository) Revoke(sessionID uuid.UUID) error {
 	return nil
 }
 
-// RevokeAllUserSessions revokes all sessions for a user
-func (r *sessionRepository) RevokeAllUserSessions(userID uuid.UUID) error {
+// RevokeAllUserSessions revokes all sessions for a user within a tenant
+func (r *sessionRepository) RevokeAllUserSessions(tenantID, userID uuid.UUID) error {
 	now := time.Now()
 	return r.db.Model(&domain.Session{}).
-		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Where("tenant_id = ? AND user_id = ? AND revoked_at IS NULL", tenantID, userID).
 		Update("revoked_at", now).Error
 }
 
-// DeleteExpired deletes expired sessions
+// DeleteExpired deletes expired sessions (across all tenants - maintenance task)
 func (r *sessionRepository) DeleteExpired() error {
 	return r.db.Where("expires_at < ?", time.Now()).Delete(&domain.Session{}).Error
 }
 
-// UpdateLastAccessed updates the last accessed timestamp
-func (r *sessionRepository) UpdateLastAccessed(sessionID uuid.UUID) error {
+// UpdateLastAccessed updates the last accessed timestamp within a tenant
+func (r *sessionRepository) UpdateLastAccessed(tenantID, sessionID uuid.UUID) error {
 	now := time.Now()
 	return r.db.Model(&domain.Session{}).
-		Where("id = ?", sessionID).
+		Where("tenant_id = ? AND id = ?", tenantID, sessionID).
 		Update("last_accessed_at", now).Error
+}
+
+// UpdateIdleTimeout updates the idle timeout for a session
+func (r *sessionRepository) UpdateIdleTimeout(tenantID, sessionID uuid.UUID, timeout time.Time) error {
+	return r.db.Model(&domain.Session{}).
+		Where("tenant_id = ? AND id = ?", tenantID, sessionID).
+		Update("idle_timeout_at", timeout).Error
+}
+
+// GetIdleTimedOutSessions retrieves sessions that have exceeded idle timeout
+func (r *sessionRepository) GetIdleTimedOutSessions(tenantID uuid.UUID) ([]domain.Session, error) {
+	var sessions []domain.Session
+	now := time.Now()
+	err := r.db.Where("tenant_id = ? AND revoked_at IS NULL AND idle_timeout_at IS NOT NULL AND idle_timeout_at < ?", tenantID, now).
+		Find(&sessions).Error
+	return sessions, err
+}
+
+// RevokeIdleTimedOut revokes sessions that have exceeded idle timeout
+func (r *sessionRepository) RevokeIdleTimedOut(tenantID uuid.UUID) (int64, error) {
+	now := time.Now()
+	result := r.db.Model(&domain.Session{}).
+		Where("tenant_id = ? AND revoked_at IS NULL AND idle_timeout_at IS NOT NULL AND idle_timeout_at < ?", tenantID, now).
+		Update("revoked_at", now)
+	return result.RowsAffected, result.Error
 }

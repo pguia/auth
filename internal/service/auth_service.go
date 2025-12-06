@@ -12,18 +12,41 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// SessionConfig holds session configuration for compliance
+type SessionConfig struct {
+	// Session expiry duration
+	SessionExpiry time.Duration
+	// Idle timeout duration (HIPAA compliance)
+	IdleTimeout time.Duration
+	// Maximum concurrent sessions per user (0 = unlimited)
+	MaxConcurrentSessions int
+}
+
+// DefaultSessionConfig returns sensible default configuration
+func DefaultSessionConfig() SessionConfig {
+	return SessionConfig{
+		SessionExpiry:         7 * 24 * time.Hour, // 7 days
+		IdleTimeout:           15 * time.Minute,   // HIPAA requires 15 min idle timeout
+		MaxConcurrentSessions: 5,                  // Limit concurrent sessions
+	}
+}
+
 // AuthService implements the gRPC AuthService interface
 type AuthService struct {
 	authv1.UnimplementedAuthServiceServer
-	userRepo            repository.UserRepository
-	sessionRepo         repository.SessionRepository
-	otpRepo             repository.OTPRepository
-	passwordService     PasswordService
-	totpService         TOTPService
-	passwordlessService PasswordlessService
-	oauthService        OAuthService
-	jwtService          JWTService
-	emailService        EmailService
+	userRepo               repository.UserRepository
+	sessionRepo            repository.SessionRepository
+	otpRepo                repository.OTPRepository
+	passwordService        PasswordService
+	totpService            TOTPService
+	passwordlessService    PasswordlessService
+	oauthService           OAuthService
+	jwtService             JWTService
+	emailService           EmailService
+	auditService           AuditService
+	loginProtectionService LoginProtectionService
+	passwordHistoryService PasswordHistoryService
+	sessionConfig          SessionConfig
 }
 
 // NewAuthService creates a new AuthService
@@ -37,30 +60,54 @@ func NewAuthService(
 	oauthService OAuthService,
 	jwtService JWTService,
 	emailService EmailService,
+	auditService AuditService,
+	loginProtectionService LoginProtectionService,
+	passwordHistoryService PasswordHistoryService,
+	sessionConfig SessionConfig,
 ) *AuthService {
 	return &AuthService{
-		userRepo:            userRepo,
-		sessionRepo:         sessionRepo,
-		otpRepo:             otpRepo,
-		passwordService:     passwordService,
-		totpService:         totpService,
-		passwordlessService: passwordlessService,
-		oauthService:        oauthService,
-		jwtService:          jwtService,
-		emailService:        emailService,
+		userRepo:               userRepo,
+		sessionRepo:            sessionRepo,
+		otpRepo:                otpRepo,
+		passwordService:        passwordService,
+		totpService:            totpService,
+		passwordlessService:    passwordlessService,
+		oauthService:           oauthService,
+		jwtService:             jwtService,
+		emailService:           emailService,
+		auditService:           auditService,
+		loginProtectionService: loginProtectionService,
+		passwordHistoryService: passwordHistoryService,
+		sessionConfig:          sessionConfig,
 	}
 }
 
 // Register registers a new user
 func (s *AuthService) Register(ctx context.Context, req *authv1.RegisterRequest) (*authv1.RegisterResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	// Validate password strength
 	if err := s.passwordService.ValidatePasswordStrength(req.Password); err != nil {
+		// Audit log failed registration attempt
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionRegister, domain.AuditResourceUser, req.Email, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "password_validation_failed",
+			"email":  req.Email,
+		})
 		return nil, fmt.Errorf("password validation failed: %w", err)
 	}
 
 	// Check if user already exists
-	existingUser, _ := s.userRepo.GetByEmail(req.Email)
+	existingUser, _ := s.userRepo.GetByEmail(tenantID, req.Email)
 	if existingUser != nil {
+		// Audit log failed registration attempt
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionRegister, domain.AuditResourceUser, req.Email, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "user_already_exists",
+			"email":  req.Email,
+		})
 		return nil, fmt.Errorf("user with email %s already exists", req.Email)
 	}
 
@@ -70,8 +117,9 @@ func (s *AuthService) Register(ctx context.Context, req *authv1.RegisterRequest)
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// Create user
+	// Create user with tenant ID
 	user := &domain.User{
+		TenantID:     tenantID,
 		Email:        req.Email,
 		PasswordHash: passwordHash,
 		FirstName:    req.FirstName,
@@ -83,8 +131,13 @@ func (s *AuthService) Register(ctx context.Context, req *authv1.RegisterRequest)
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
+	// Record password in history for compliance
+	if err := s.passwordHistoryService.RecordPassword(ctx, tenantID, user.ID, passwordHash); err != nil {
+		fmt.Printf("Failed to record password history: %v\n", err)
+	}
+
 	// Generate email verification token
-	verificationToken, err := GenerateEmailVerificationToken(user.Email, user.ID, s.otpRepo)
+	verificationToken, err := GenerateEmailVerificationToken(tenantID, user.Email, user.ID, s.otpRepo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate verification token: %w", err)
 	}
@@ -94,6 +147,11 @@ func (s *AuthService) Register(ctx context.Context, req *authv1.RegisterRequest)
 		// Log error but don't fail registration
 		fmt.Printf("Failed to send verification email: %v\n", err)
 	}
+
+	// Audit log successful registration
+	s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionRegister, domain.AuditStatusSuccess, map[string]interface{}{
+		"email": user.Email,
+	})
 
 	return &authv1.RegisterResponse{
 		UserId:        user.ID.String(),
@@ -105,14 +163,52 @@ func (s *AuthService) Register(ctx context.Context, req *authv1.RegisterRequest)
 
 // Login authenticates a user
 func (s *AuthService) Login(ctx context.Context, req *authv1.LoginRequest) (*authv1.LoginResponse, error) {
-	// Get user by email
-	user, err := s.userRepo.GetByEmail(req.Email)
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
+	ipAddress := IPAddressFromContext(ctx)
+
+	// Check if login is allowed (brute force protection)
+	if err := s.loginProtectionService.CheckLoginAllowed(ctx, tenantID, req.Email, ipAddress); err != nil {
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionLogin, domain.AuditResourceUser, req.Email, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "rate_limited",
+			"email":  req.Email,
+		})
+		return nil, err
+	}
+
+	// Get user by email
+	user, err := s.userRepo.GetByEmail(tenantID, req.Email)
+	if err != nil {
+		// Record failed login attempt
+		s.loginProtectionService.RecordLoginAttempt(ctx, tenantID, req.Email, ipAddress, nil, false, "user_not_found")
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionLogin, domain.AuditResourceUser, req.Email, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_credentials",
+			"email":  req.Email,
+		})
 		return nil, fmt.Errorf("invalid credentials")
+	}
+
+	// Check if account is locked
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		s.loginProtectionService.RecordLoginAttempt(ctx, tenantID, req.Email, ipAddress, &user.ID, false, "account_locked")
+		s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionLogin, domain.AuditStatusFailure, map[string]interface{}{
+			"reason":       "account_locked",
+			"locked_until": user.LockedUntil,
+		})
+		return nil, fmt.Errorf("account is temporarily locked, please try again later")
 	}
 
 	// Verify password
 	if err := s.passwordService.VerifyPassword(user.PasswordHash, req.Password); err != nil {
+		// Record failed login attempt
+		s.loginProtectionService.RecordLoginAttempt(ctx, tenantID, req.Email, ipAddress, &user.ID, false, "invalid_password")
+		s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionLogin, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_password",
+		})
 		return nil, fmt.Errorf("invalid credentials")
 	}
 
@@ -130,14 +226,40 @@ func (s *AuthService) Login(ctx context.Context, req *authv1.LoginRequest) (*aut
 		// Verify TOTP code
 		if !s.totpService.ValidateCode(user.TwoFactorSecret, req.TotpCode) {
 			// Check backup codes
-			if err := s.userRepo.UseBackupCode(user.ID, req.TotpCode); err != nil {
+			if err := s.userRepo.UseBackupCode(tenantID, user.ID, req.TotpCode); err != nil {
+				s.loginProtectionService.RecordLoginAttempt(ctx, tenantID, req.Email, ipAddress, &user.ID, false, "invalid_2fa_code")
+				s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionLogin, domain.AuditStatusFailure, map[string]interface{}{
+					"reason": "invalid_2fa_code",
+				})
 				return nil, fmt.Errorf("invalid 2FA code")
 			}
 		}
 	}
 
-	// Generate tokens
-	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, nil)
+	// Check if user must change password
+	if user.MustChangePassword {
+		s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionLogin, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "password_change_required",
+		})
+		return nil, fmt.Errorf("password change required before proceeding")
+	}
+
+	// Check max concurrent sessions
+	if s.sessionConfig.MaxConcurrentSessions > 0 {
+		activeSessions, err := s.sessionRepo.CountActiveSessions(tenantID, user.ID)
+		if err == nil && activeSessions >= int64(s.sessionConfig.MaxConcurrentSessions) {
+			// Revoke oldest session to make room
+			sessions, _ := s.sessionRepo.GetActiveSessions(tenantID, user.ID)
+			if len(sessions) > 0 {
+				s.sessionRepo.Revoke(tenantID, sessions[len(sessions)-1].ID)
+			}
+		}
+	}
+
+	// Generate tokens with tenant ID
+	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, map[string]string{
+		"tenant_id": tenantID.String(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
@@ -147,24 +269,36 @@ func (s *AuthService) Login(ctx context.Context, req *authv1.LoginRequest) (*aut
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
-	// Create session
+	// Create session with tenant ID and idle timeout
+	now := time.Now()
 	session := &domain.Session{
-		UserID:       user.ID,
-		RefreshToken: refreshToken,
-		DeviceID:     req.DeviceId,
-		DeviceName:   req.DeviceName,
-		ExpiresAt:    time.Now().Add(7 * 24 * time.Hour), // 7 days
+		TenantID:       tenantID,
+		UserID:         user.ID,
+		RefreshToken:   refreshToken,
+		DeviceID:       req.DeviceId,
+		DeviceName:     req.DeviceName,
+		IPAddress:      ipAddress,
+		UserAgent:      UserAgentFromContext(ctx),
+		ExpiresAt:      now.Add(s.sessionConfig.SessionExpiry),
+		IdleTimeoutAt:  ptrTime(now.Add(s.sessionConfig.IdleTimeout)),
+		LastAccessedAt: now,
 	}
 
 	if err := s.sessionRepo.Create(session); err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Update last login
-	if err := s.userRepo.UpdateLastLogin(user.ID); err != nil {
-		// Log error but don't fail login
+	// Update last login and record successful login
+	if err := s.userRepo.UpdateLastLogin(tenantID, user.ID); err != nil {
 		fmt.Printf("Failed to update last login: %v\n", err)
 	}
+	s.loginProtectionService.RecordLoginAttempt(ctx, tenantID, req.Email, ipAddress, &user.ID, true, "")
+
+	// Audit log successful login
+	s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionLogin, domain.AuditStatusSuccess, map[string]interface{}{
+		"session_id": session.ID.String(),
+		"device_id":  req.DeviceId,
+	})
 
 	return &authv1.LoginResponse{
 		AccessToken:  accessToken,
@@ -175,27 +309,53 @@ func (s *AuthService) Login(ctx context.Context, req *authv1.LoginRequest) (*aut
 	}, nil
 }
 
+// ptrTime returns a pointer to a time value
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}
+
 // RefreshToken refreshes an access token
 func (s *AuthService) RefreshToken(ctx context.Context, req *authv1.RefreshTokenRequest) (*authv1.RefreshTokenResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	// Get session by refresh token
-	session, err := s.sessionRepo.GetByRefreshToken(req.RefreshToken)
+	session, err := s.sessionRepo.GetByRefreshToken(tenantID, req.RefreshToken)
 	if err != nil {
 		return nil, fmt.Errorf("invalid refresh token")
 	}
 
 	// Check if session is active
 	if !session.IsActive() {
+		s.auditService.LogSessionAction(ctx, tenantID, session.ID, session.UserID, domain.AuditActionTokenRefresh, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "session_expired_or_revoked",
+		})
 		return nil, fmt.Errorf("session expired or revoked")
 	}
 
+	// Check idle timeout (HIPAA compliance)
+	if session.IdleTimeoutAt != nil && session.IdleTimeoutAt.Before(time.Now()) {
+		// Session has timed out due to inactivity
+		s.sessionRepo.Revoke(tenantID, session.ID)
+		s.auditService.LogSessionAction(ctx, tenantID, session.ID, session.UserID, domain.AuditActionTokenRefresh, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "idle_timeout",
+		})
+		return nil, fmt.Errorf("session timed out due to inactivity")
+	}
+
 	// Get user
-	user, err := s.userRepo.GetByID(session.UserID)
+	user, err := s.userRepo.GetByID(tenantID, session.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
 
-	// Generate new tokens
-	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, nil)
+	// Generate new tokens with tenant ID
+	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, map[string]string{
+		"tenant_id": tenantID.String(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
@@ -205,12 +365,18 @@ func (s *AuthService) RefreshToken(ctx context.Context, req *authv1.RefreshToken
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
-	// Update session with new refresh token
+	// Update session with new refresh token and reset idle timeout
+	now := time.Now()
 	session.RefreshToken = newRefreshToken
-	session.ExpiresAt = time.Now().Add(7 * 24 * time.Hour)
+	session.ExpiresAt = now.Add(s.sessionConfig.SessionExpiry)
+	session.IdleTimeoutAt = ptrTime(now.Add(s.sessionConfig.IdleTimeout))
+	session.LastAccessedAt = now
 	if err := s.sessionRepo.Update(session); err != nil {
 		return nil, fmt.Errorf("failed to update session: %w", err)
 	}
+
+	// Audit log token refresh
+	s.auditService.LogSessionAction(ctx, tenantID, session.ID, session.UserID, domain.AuditActionTokenRefresh, domain.AuditStatusSuccess, nil)
 
 	return &authv1.RefreshTokenResponse{
 		AccessToken:  accessToken,
@@ -221,13 +387,29 @@ func (s *AuthService) RefreshToken(ctx context.Context, req *authv1.RefreshToken
 
 // Logout logs out a user
 func (s *AuthService) Logout(ctx context.Context, req *authv1.LogoutRequest) (*authv1.LogoutResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	sessionID, err := uuid.Parse(req.SessionId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid session ID")
 	}
 
-	if err := s.sessionRepo.Revoke(sessionID); err != nil {
+	// Get session first for audit log
+	session, _ := s.sessionRepo.GetByID(tenantID, sessionID)
+
+	if err := s.sessionRepo.Revoke(tenantID, sessionID); err != nil {
 		return nil, fmt.Errorf("failed to logout: %w", err)
+	}
+
+	// Audit log logout
+	if session != nil {
+		s.auditService.LogUserAction(ctx, tenantID, session.UserID, nil, domain.AuditActionLogout, domain.AuditStatusSuccess, map[string]interface{}{
+			"session_id": sessionID.String(),
+		})
 	}
 
 	return &authv1.LogoutResponse{
@@ -238,25 +420,45 @@ func (s *AuthService) Logout(ctx context.Context, req *authv1.LogoutRequest) (*a
 
 // ChangePassword changes a user's password
 func (s *AuthService) ChangePassword(ctx context.Context, req *authv1.ChangePasswordRequest) (*authv1.ChangePasswordResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
 	// Get user
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
 
 	// Verify current password
 	if err := s.passwordService.VerifyPassword(user.PasswordHash, req.CurrentPassword); err != nil {
+		s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionPasswordChange, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_current_password",
+		})
 		return nil, fmt.Errorf("invalid current password")
 	}
 
-	// Validate new password
+	// Validate new password strength
 	if err := s.passwordService.ValidatePasswordStrength(req.NewPassword); err != nil {
+		s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionPasswordChange, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "password_validation_failed",
+		})
 		return nil, fmt.Errorf("password validation failed: %w", err)
+	}
+
+	// Check password history for compliance (prevent reuse)
+	if err := s.passwordHistoryService.CheckPasswordReuse(ctx, tenantID, userID, req.NewPassword); err != nil {
+		s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionPasswordChange, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "password_reuse_detected",
+		})
+		return nil, err
 	}
 
 	// Hash new password
@@ -266,14 +468,22 @@ func (s *AuthService) ChangePassword(ctx context.Context, req *authv1.ChangePass
 	}
 
 	// Update password
-	if err := s.userRepo.UpdatePassword(userID, newPasswordHash); err != nil {
+	if err := s.userRepo.UpdatePassword(tenantID, userID, newPasswordHash); err != nil {
 		return nil, fmt.Errorf("failed to update password: %w", err)
 	}
 
+	// Record password in history for compliance
+	if err := s.passwordHistoryService.RecordPassword(ctx, tenantID, userID, newPasswordHash); err != nil {
+		fmt.Printf("Failed to record password history: %v\n", err)
+	}
+
 	// Revoke all sessions except current one
-	if err := s.sessionRepo.RevokeAllUserSessions(userID); err != nil {
+	if err := s.sessionRepo.RevokeAllUserSessions(tenantID, userID); err != nil {
 		fmt.Printf("Failed to revoke sessions: %v\n", err)
 	}
+
+	// Audit log successful password change
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionPasswordChange, domain.AuditStatusSuccess, nil)
 
 	return &authv1.ChangePasswordResponse{
 		Success: true,
@@ -283,9 +493,20 @@ func (s *AuthService) ChangePassword(ctx context.Context, req *authv1.ChangePass
 
 // ForgotPassword initiates password reset
 func (s *AuthService) ForgotPassword(ctx context.Context, req *authv1.ForgotPasswordRequest) (*authv1.ForgotPasswordResponse, error) {
-	// Get user
-	user, err := s.userRepo.GetByEmail(req.Email)
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
+	// Get user
+	user, err := s.userRepo.GetByEmail(tenantID, req.Email)
+	if err != nil {
+		// Audit log the attempt (but don't reveal if user exists)
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionPasswordResetRequest, domain.AuditResourceUser, req.Email, domain.AuditStatusSuccess, map[string]interface{}{
+			"email":      req.Email,
+			"user_found": false,
+		})
 		// Don't reveal if user exists or not
 		return &authv1.ForgotPasswordResponse{
 			Success: true,
@@ -294,7 +515,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *authv1.ForgotPass
 	}
 
 	// Generate password reset token
-	resetToken, err := GeneratePasswordResetToken(user.Email, user.ID, s.otpRepo)
+	resetToken, err := GeneratePasswordResetToken(tenantID, user.Email, user.ID, s.otpRepo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate reset token: %w", err)
 	}
@@ -304,6 +525,9 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *authv1.ForgotPass
 		fmt.Printf("Failed to send password reset email: %v\n", err)
 	}
 
+	// Audit log password reset request
+	s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionPasswordResetRequest, domain.AuditStatusSuccess, nil)
+
 	return &authv1.ForgotPasswordResponse{
 		Success: true,
 		Message: "If an account with that email exists, a password reset link has been sent.",
@@ -312,8 +536,14 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *authv1.ForgotPass
 
 // ResetPassword resets a user's password
 func (s *AuthService) ResetPassword(ctx context.Context, req *authv1.ResetPasswordRequest) (*authv1.ResetPasswordResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	// Verify token
-	otp, err := s.otpRepo.GetByToken(req.Token)
+	otp, err := s.otpRepo.GetByToken(tenantID, req.Token)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or expired token")
 	}
@@ -322,9 +552,20 @@ func (s *AuthService) ResetPassword(ctx context.Context, req *authv1.ResetPasswo
 		return nil, fmt.Errorf("invalid token type")
 	}
 
-	// Validate new password
+	// Validate new password strength
 	if err := s.passwordService.ValidatePasswordStrength(req.NewPassword); err != nil {
+		s.auditService.LogUserAction(ctx, tenantID, otp.UserID, nil, domain.AuditActionPasswordReset, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "password_validation_failed",
+		})
 		return nil, fmt.Errorf("password validation failed: %w", err)
+	}
+
+	// Check password history for compliance (prevent reuse)
+	if err := s.passwordHistoryService.CheckPasswordReuse(ctx, tenantID, otp.UserID, req.NewPassword); err != nil {
+		s.auditService.LogUserAction(ctx, tenantID, otp.UserID, nil, domain.AuditActionPasswordReset, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "password_reuse_detected",
+		})
+		return nil, err
 	}
 
 	// Hash new password
@@ -334,19 +575,27 @@ func (s *AuthService) ResetPassword(ctx context.Context, req *authv1.ResetPasswo
 	}
 
 	// Update password
-	if err := s.userRepo.UpdatePassword(otp.UserID, newPasswordHash); err != nil {
+	if err := s.userRepo.UpdatePassword(tenantID, otp.UserID, newPasswordHash); err != nil {
 		return nil, fmt.Errorf("failed to update password: %w", err)
 	}
 
+	// Record password in history for compliance
+	if err := s.passwordHistoryService.RecordPassword(ctx, tenantID, otp.UserID, newPasswordHash); err != nil {
+		fmt.Printf("Failed to record password history: %v\n", err)
+	}
+
 	// Mark token as used
-	if err := s.otpRepo.MarkAsUsed(otp.ID); err != nil {
+	if err := s.otpRepo.MarkAsUsed(tenantID, otp.ID); err != nil {
 		fmt.Printf("Failed to mark token as used: %v\n", err)
 	}
 
 	// Revoke all sessions
-	if err := s.sessionRepo.RevokeAllUserSessions(otp.UserID); err != nil {
+	if err := s.sessionRepo.RevokeAllUserSessions(tenantID, otp.UserID); err != nil {
 		fmt.Printf("Failed to revoke sessions: %v\n", err)
 	}
+
+	// Audit log successful password reset
+	s.auditService.LogUserAction(ctx, tenantID, otp.UserID, nil, domain.AuditActionPasswordReset, domain.AuditStatusSuccess, nil)
 
 	return &authv1.ResetPasswordResponse{
 		Success: true,
@@ -356,13 +605,19 @@ func (s *AuthService) ResetPassword(ctx context.Context, req *authv1.ResetPasswo
 
 // Enable2FA enables 2FA for a user
 func (s *AuthService) Enable2FA(ctx context.Context, req *authv1.Enable2FARequest) (*authv1.Enable2FAResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
 	// Get user
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -380,14 +635,17 @@ func (s *AuthService) Enable2FA(ctx context.Context, req *authv1.Enable2FAReques
 	}
 
 	// Store backup codes
-	if err := s.userRepo.CreateBackupCodes(userID, backupCodes); err != nil {
+	if err := s.userRepo.CreateBackupCodes(tenantID, userID, backupCodes); err != nil {
 		return nil, fmt.Errorf("failed to store backup codes: %w", err)
 	}
 
 	// Enable 2FA (secret will be stored after verification)
-	if err := s.userRepo.Enable2FA(userID, secret); err != nil {
+	if err := s.userRepo.Enable2FA(tenantID, userID, secret); err != nil {
 		return nil, fmt.Errorf("failed to enable 2FA: %w", err)
 	}
+
+	// Audit log 2FA enabled
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFAEnable, domain.AuditStatusSuccess, nil)
 
 	return &authv1.Enable2FAResponse{
 		Secret:      secret,
@@ -398,25 +656,39 @@ func (s *AuthService) Enable2FA(ctx context.Context, req *authv1.Enable2FAReques
 
 // Verify2FA verifies a 2FA code
 func (s *AuthService) Verify2FA(ctx context.Context, req *authv1.Verify2FARequest) (*authv1.Verify2FAResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
 	// Get user
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
 
 	// Verify TOTP code
 	if !s.totpService.ValidateCode(user.TwoFactorSecret, req.TotpCode) {
+		s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFAVerify, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_code",
+		})
 		return nil, fmt.Errorf("invalid 2FA code")
 	}
 
+	// Audit log 2FA verification
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFAVerify, domain.AuditStatusSuccess, nil)
+
 	// If this is completing a login flow, generate tokens
 	if req.SessionId != "" {
-		accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, nil)
+		accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, map[string]string{
+			"tenant_id": tenantID.String(),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate access token: %w", err)
 		}
@@ -443,31 +715,46 @@ func (s *AuthService) Verify2FA(ctx context.Context, req *authv1.Verify2FAReques
 
 // Disable2FA disables 2FA for a user
 func (s *AuthService) Disable2FA(ctx context.Context, req *authv1.Disable2FARequest) (*authv1.Disable2FAResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
 	// Get user
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
 
 	// Verify password
 	if err := s.passwordService.VerifyPassword(user.PasswordHash, req.Password); err != nil {
+		s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFADisable, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_password",
+		})
 		return nil, fmt.Errorf("invalid password")
 	}
 
 	// Verify TOTP code
 	if !s.totpService.ValidateCode(user.TwoFactorSecret, req.TotpCode) {
+		s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFADisable, domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_2fa_code",
+		})
 		return nil, fmt.Errorf("invalid 2FA code")
 	}
 
 	// Disable 2FA
-	if err := s.userRepo.Disable2FA(userID); err != nil {
+	if err := s.userRepo.Disable2FA(tenantID, userID); err != nil {
 		return nil, fmt.Errorf("failed to disable 2FA: %w", err)
 	}
+
+	// Audit log 2FA disabled
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFADisable, domain.AuditStatusSuccess, nil)
 
 	return &authv1.Disable2FAResponse{
 		Success: true,
@@ -477,13 +764,19 @@ func (s *AuthService) Disable2FA(ctx context.Context, req *authv1.Disable2FARequ
 
 // Generate2FABackupCodes generates new backup codes
 func (s *AuthService) Generate2FABackupCodes(ctx context.Context, req *authv1.Generate2FABackupCodesRequest) (*authv1.Generate2FABackupCodesResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	userID, err := uuid.Parse(req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID")
 	}
 
 	// Get user
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -500,9 +793,12 @@ func (s *AuthService) Generate2FABackupCodes(ctx context.Context, req *authv1.Ge
 	}
 
 	// Store backup codes
-	if err := s.userRepo.CreateBackupCodes(userID, backupCodes); err != nil {
+	if err := s.userRepo.CreateBackupCodes(tenantID, userID, backupCodes); err != nil {
 		return nil, fmt.Errorf("failed to store backup codes: %w", err)
 	}
+
+	// Audit log backup codes regenerated
+	s.auditService.LogUserAction(ctx, tenantID, userID, nil, domain.AuditActionMFABackupGenerate, domain.AuditStatusSuccess, nil)
 
 	return &authv1.Generate2FABackupCodesResponse{
 		BackupCodes: backupCodes,
@@ -511,8 +807,14 @@ func (s *AuthService) Generate2FABackupCodes(ctx context.Context, req *authv1.Ge
 
 // SendPasswordlessEmail sends a passwordless login email
 func (s *AuthService) SendPasswordlessEmail(ctx context.Context, req *authv1.SendPasswordlessEmailRequest) (*authv1.SendPasswordlessEmailResponse, error) {
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
 	// Generate passwordless token
-	token, err := s.passwordlessService.GenerateToken(req.Email)
+	token, err := s.passwordlessService.GenerateToken(tenantID, req.Email)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate passwordless token: %w", err)
 	}
@@ -521,6 +823,9 @@ func (s *AuthService) SendPasswordlessEmail(ctx context.Context, req *authv1.Sen
 	if err := s.emailService.SendPasswordlessEmail(req.Email, token.Token); err != nil {
 		return nil, fmt.Errorf("failed to send passwordless email: %w", err)
 	}
+
+	// Audit log passwordless request
+	s.auditService.LogAction(ctx, tenantID, domain.AuditActionPasswordlessSend, domain.AuditResourceUser, req.Email, domain.AuditStatusSuccess, nil)
 
 	return &authv1.SendPasswordlessEmailResponse{
 		Success:   true,
@@ -531,27 +836,46 @@ func (s *AuthService) SendPasswordlessEmail(ctx context.Context, req *authv1.Sen
 
 // VerifyPasswordlessToken verifies a passwordless login token
 func (s *AuthService) VerifyPasswordlessToken(ctx context.Context, req *authv1.VerifyPasswordlessTokenRequest) (*authv1.VerifyPasswordlessTokenResponse, error) {
-	// Verify token
-	otp, err := s.passwordlessService.VerifyToken(req.Token)
+	// Extract tenant ID from context
+	tenantID, err := TenantFromContext(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("tenant context required: %w", err)
+	}
+
+	ipAddress := IPAddressFromContext(ctx)
+
+	// Verify token
+	otp, err := s.passwordlessService.VerifyToken(tenantID, req.Token)
+	if err != nil {
+		s.auditService.LogAction(ctx, tenantID, domain.AuditActionPasswordlessVerify, domain.AuditResourceUser, "", domain.AuditStatusFailure, map[string]interface{}{
+			"reason": "invalid_token",
+		})
 		return nil, fmt.Errorf("invalid or expired token: %w", err)
 	}
 
 	// Get or create user
-	user, err := s.userRepo.GetByEmail(otp.Email)
+	user, err := s.userRepo.GetByEmail(tenantID, otp.Email)
 	if err != nil {
-		// Create new user
+		// Create new user with tenant ID
 		user = &domain.User{
+			TenantID:      tenantID,
 			Email:         otp.Email,
 			EmailVerified: true,
 		}
 		if err := s.userRepo.Create(user); err != nil {
 			return nil, fmt.Errorf("failed to create user: %w", err)
 		}
+
+		// Audit log new user registration via passwordless
+		s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionRegister, domain.AuditStatusSuccess, map[string]interface{}{
+			"method": "passwordless",
+		})
 	}
 
-	// Generate tokens
-	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, nil)
+	// Generate tokens with tenant ID
+	accessToken, err := s.jwtService.GenerateAccessToken(user.ID, user.Email, map[string]string{
+		"tenant_id": tenantID.String(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
@@ -561,13 +885,19 @@ func (s *AuthService) VerifyPasswordlessToken(ctx context.Context, req *authv1.V
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
-	// Create session
+	// Create session with tenant ID and idle timeout
+	now := time.Now()
 	session := &domain.Session{
-		UserID:       user.ID,
-		RefreshToken: refreshToken,
-		DeviceID:     req.DeviceId,
-		DeviceName:   req.DeviceName,
-		ExpiresAt:    time.Now().Add(7 * 24 * time.Hour),
+		TenantID:       tenantID,
+		UserID:         user.ID,
+		RefreshToken:   refreshToken,
+		DeviceID:       req.DeviceId,
+		DeviceName:     req.DeviceName,
+		IPAddress:      ipAddress,
+		UserAgent:      UserAgentFromContext(ctx),
+		ExpiresAt:      now.Add(s.sessionConfig.SessionExpiry),
+		IdleTimeoutAt:  ptrTime(now.Add(s.sessionConfig.IdleTimeout)),
+		LastAccessedAt: now,
 	}
 
 	if err := s.sessionRepo.Create(session); err != nil {
@@ -575,9 +905,14 @@ func (s *AuthService) VerifyPasswordlessToken(ctx context.Context, req *authv1.V
 	}
 
 	// Update last login
-	if err := s.userRepo.UpdateLastLogin(user.ID); err != nil {
+	if err := s.userRepo.UpdateLastLogin(tenantID, user.ID); err != nil {
 		fmt.Printf("Failed to update last login: %v\n", err)
 	}
+
+	// Audit log passwordless login
+	s.auditService.LogUserAction(ctx, tenantID, user.ID, nil, domain.AuditActionPasswordlessVerify, domain.AuditStatusSuccess, map[string]interface{}{
+		"session_id": session.ID.String(),
+	})
 
 	return &authv1.VerifyPasswordlessTokenResponse{
 		AccessToken:  accessToken,
