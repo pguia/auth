@@ -9,6 +9,7 @@ import "google/protobuf/timestamp.proto";
 // ============================================
 // Auth Service Definition
 // ============================================
+// Note: Tenant ID is passed via gRPC metadata header "x-tenant-id"
 service AuthService {
   // Email/Password Authentication
   rpc Register(RegisterRequest) returns (RegisterResponse);
@@ -16,36 +17,58 @@ service AuthService {
   rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
   rpc Logout(LogoutRequest) returns (LogoutResponse);
   rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordResponse);
-  rpc ForgotPassword(ForgotPasswordRequest) returns (ForgotPasswordResponse); 
+  rpc ForgotPassword(ForgotPasswordRequest) returns (ForgotPasswordResponse);
   rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
-  
+
   // 2FA/TOTP Management
   rpc Enable2FA(Enable2FARequest) returns (Enable2FAResponse);
   rpc Verify2FA(Verify2FARequest) returns (Verify2FAResponse);
   rpc Disable2FA(Disable2FARequest) returns (Disable2FAResponse);
   rpc Generate2FABackupCodes(Generate2FABackupCodesRequest) returns (Generate2FABackupCodesResponse);
-  
+
   // Passwordless Authentication
   rpc SendPasswordlessEmail(SendPasswordlessEmailRequest) returns (SendPasswordlessEmailResponse);
   rpc VerifyPasswordlessToken(VerifyPasswordlessTokenRequest) returns (VerifyPasswordlessTokenResponse);
-  
+
   // OAuth
   rpc GetOAuthURL(GetOAuthURLRequest) returns (GetOAuthURLResponse);
   rpc OAuthCallback(OAuthCallbackRequest) returns (OAuthCallbackResponse);
   rpc LinkOAuthAccount(LinkOAuthAccountRequest) returns (LinkOAuthAccountResponse);
   rpc UnlinkOAuthAccount(UnlinkOAuthAccountRequest) returns (UnlinkOAuthAccountResponse);
-  
+
   // Token & Session Management
   rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
   rpc GetActiveSessions(GetActiveSessionsRequest) returns (GetActiveSessionsResponse);
   rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
-  
+  rpc RevokeAllSessions(RevokeAllSessionsRequest) returns (RevokeAllSessionsResponse);
+
   // User Management
   rpc GetUserProfile(GetUserProfileRequest) returns (GetUserProfileResponse);
   rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UpdateUserProfileResponse);
   rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse);
   rpc ResendVerificationEmail(ResendVerificationEmailRequest) returns (ResendVerificationEmailResponse);
+
+  // Account Security (Compliance)
+  rpc GetAccountLockoutStatus(GetAccountLockoutStatusRequest) returns (GetAccountLockoutStatusResponse);
+  rpc UnlockAccount(UnlockAccountRequest) returns (UnlockAccountResponse);
+  rpc GetLoginHistory(GetLoginHistoryRequest) returns (GetLoginHistoryResponse);
+
+  // Audit Logs (Compliance - HIPAA, SOC 2, GDPR)
+  rpc GetAuditLogs(GetAuditLogsRequest) returns (GetAuditLogsResponse);
+}
+
+// ============================================
+// Tenant Management Service
+// ============================================
+service TenantService {
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+  rpc UpdateTenant(UpdateTenantRequest) returns (UpdateTenantResponse);
+  rpc DeleteTenant(DeleteTenantRequest) returns (DeleteTenantResponse);
+  rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+  rpc SuspendTenant(SuspendTenantRequest) returns (SuspendTenantResponse);
+  rpc ActivateTenant(ActivateTenantRequest) returns (ActivateTenantResponse);
 }
 
 // ============================================
@@ -64,6 +87,7 @@ message RegisterResponse {
   string email = 2;
   bool email_verified = 3;
   string message = 4;
+  string tenant_id = 5;
 }
 
 message LoginRequest {
@@ -81,6 +105,7 @@ message LoginResponse {
   User user = 4;
   bool requires_2fa = 5; // If true, client must call Verify2FA
   string session_id = 6;
+  bool requires_password_change = 7; // If true, user must change password
 }
 
 message RefreshTokenRequest {
@@ -118,12 +143,6 @@ message ForgotPasswordRequest {
 }
 
 message ForgotPasswordResponse {
-  bool success = 1;
-  string message = 2;
-}
-
-
-message ResetPasswordRequestResponse {
   bool success = 1;
   string message = 2;
 }
@@ -280,8 +299,9 @@ message ValidateTokenResponse {
   bool valid = 1;
   string user_id = 2;
   string email = 3;
-  map<string, string> claims = 4;
-  google.protobuf.Timestamp expires_at = 5;
+  string tenant_id = 4;
+  map<string, string> claims = 5;
+  google.protobuf.Timestamp expires_at = 6;
 }
 
 message RevokeTokenRequest {
@@ -310,6 +330,17 @@ message RevokeSessionRequest {
 message RevokeSessionResponse {
   bool success = 1;
   string message = 2;
+}
+
+message RevokeAllSessionsRequest {
+  string user_id = 1;
+  bool except_current = 2; // If true, keep the current session
+}
+
+message RevokeAllSessionsResponse {
+  bool success = 1;
+  string message = 2;
+  int32 revoked_count = 3;
 }
 
 // ============================================
@@ -354,34 +385,197 @@ message ResendVerificationEmailResponse {
 }
 
 // ============================================
+// Messages - Account Security (Compliance)
+// ============================================
+message GetAccountLockoutStatusRequest {
+  string user_id = 1;
+}
+
+message GetAccountLockoutStatusResponse {
+  bool is_locked = 1;
+  google.protobuf.Timestamp locked_at = 2;
+  google.protobuf.Timestamp unlocks_at = 3;
+  string lock_reason = 4;
+  int32 failed_attempts = 5;
+}
+
+message UnlockAccountRequest {
+  string user_id = 1;
+}
+
+message UnlockAccountResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetLoginHistoryRequest {
+  string user_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  google.protobuf.Timestamp start_time = 4;
+  google.protobuf.Timestamp end_time = 5;
+}
+
+message GetLoginHistoryResponse {
+  repeated LoginAttempt attempts = 1;
+  int64 total = 2;
+}
+
+message LoginAttempt {
+  string id = 1;
+  string email = 2;
+  string ip_address = 3;
+  string user_agent = 4;
+  bool success = 5;
+  string failure_reason = 6;
+  google.protobuf.Timestamp attempted_at = 7;
+}
+
+// ============================================
+// Messages - Audit Logs (Compliance)
+// ============================================
+message GetAuditLogsRequest {
+  string user_id = 1; // Optional: filter by user
+  string action = 2; // Optional: filter by action type
+  google.protobuf.Timestamp start_time = 3;
+  google.protobuf.Timestamp end_time = 4;
+  int32 limit = 5;
+  int32 offset = 6;
+}
+
+message GetAuditLogsResponse {
+  repeated AuditLog logs = 1;
+  int64 total = 2;
+}
+
+message AuditLog {
+  string id = 1;
+  string tenant_id = 2;
+  string user_id = 3;
+  string actor_id = 4;
+  string action = 5;
+  string resource_type = 6;
+  string resource_id = 7;
+  string status = 8;
+  string failure_reason = 9;
+  string ip_address = 10;
+  string user_agent = 11;
+  map<string, string> metadata = 12;
+  google.protobuf.Timestamp created_at = 13;
+}
+
+// ============================================
+// Messages - Tenant Management
+// ============================================
+message CreateTenantRequest {
+  string name = 1;
+  string slug = 2;
+  map<string, string> settings = 3;
+}
+
+message CreateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message GetTenantRequest {
+  string tenant_id = 1;
+}
+
+message GetTenantResponse {
+  Tenant tenant = 1;
+}
+
+message UpdateTenantRequest {
+  string tenant_id = 1;
+  string name = 2;
+  map<string, string> settings = 3;
+}
+
+message UpdateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message DeleteTenantRequest {
+  string tenant_id = 1;
+}
+
+message DeleteTenantResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListTenantsRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
+
+message ListTenantsResponse {
+  repeated Tenant tenants = 1;
+  int64 total = 2;
+}
+
+message SuspendTenantRequest {
+  string tenant_id = 1;
+  string reason = 2;
+}
+
+message SuspendTenantResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ActivateTenantRequest {
+  string tenant_id = 1;
+}
+
+message ActivateTenantResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message Tenant {
+  string id = 1;
+  string name = 2;
+  string slug = 3;
+  TenantStatus status = 4;
+  map<string, string> settings = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// ============================================
 // Common Models
 // ============================================
 message User {
   string id = 1;
-  string email = 2;
-  bool email_verified = 3;
-  string first_name = 4;
-  string last_name = 5;
-  string phone_number = 6;
-  bool two_factor_enabled = 7;
-  repeated OAuthAccount oauth_accounts = 8;
-  google.protobuf.Timestamp created_at = 9;
-  google.protobuf.Timestamp updated_at = 10;
-  google.protobuf.Timestamp last_login_at = 11;
-  map<string, string> metadata = 12;
+  string tenant_id = 2;
+  string email = 3;
+  bool email_verified = 4;
+  string first_name = 5;
+  string last_name = 6;
+  string phone_number = 7;
+  bool two_factor_enabled = 8;
+  repeated OAuthAccount oauth_accounts = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+  google.protobuf.Timestamp last_login_at = 12;
+  map<string, string> metadata = 13;
+  bool account_locked = 14;
+  bool must_change_password = 15;
 }
 
 message Session {
   string id = 1;
   string user_id = 2;
-  string device_id = 3;
-  string device_name = 4;
-  string ip_address = 5;
-  string user_agent = 6;
-  google.protobuf.Timestamp created_at = 7;
-  google.protobuf.Timestamp last_accessed_at = 8;
-  google.protobuf.Timestamp expires_at = 9;
-  bool is_current = 10;
+  string tenant_id = 3;
+  string device_id = 4;
+  string device_name = 5;
+  string ip_address = 6;
+  string user_agent = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp last_accessed_at = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  bool is_current = 11;
 }
 
 message OAuthAccount {
@@ -408,4 +602,11 @@ enum TokenType {
   TOKEN_TYPE_UNSPECIFIED = 0;
   TOKEN_TYPE_ACCESS = 1;
   TOKEN_TYPE_REFRESH = 2;
+}
+
+enum TenantStatus {
+  TENANT_STATUS_UNSPECIFIED = 0;
+  TENANT_STATUS_ACTIVE = 1;
+  TENANT_STATUS_SUSPENDED = 2;
+  TENANT_STATUS_DELETED = 3;
 }
