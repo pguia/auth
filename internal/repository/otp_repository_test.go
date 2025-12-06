@@ -22,7 +22,9 @@ func TestOTPRepository_Create(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "token-123",
@@ -41,7 +43,9 @@ func TestOTPRepository_GetByToken_Success(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "valid-token",
@@ -52,7 +56,7 @@ func TestOTPRepository_GetByToken_Success(t *testing.T) {
 	err := repo.Create(otp)
 	assert.NoError(t, err)
 
-	retrieved, err := repo.GetByToken("valid-token")
+	retrieved, err := repo.GetByToken(tenantID, "valid-token")
 
 	assert.NoError(t, err)
 	assert.NotNil(t, retrieved)
@@ -64,7 +68,8 @@ func TestOTPRepository_GetByToken_NotFound(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
-	retrieved, err := repo.GetByToken("nonexistent-token")
+	tenantID := uuid.New()
+	retrieved, err := repo.GetByToken(tenantID, "nonexistent-token")
 
 	assert.Error(t, err)
 	assert.Nil(t, retrieved)
@@ -76,7 +81,9 @@ func TestOTPRepository_GetByToken_Expired(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "expired-token",
@@ -87,7 +94,7 @@ func TestOTPRepository_GetByToken_Expired(t *testing.T) {
 	err := repo.Create(otp)
 	assert.NoError(t, err)
 
-	retrieved, err := repo.GetByToken("expired-token")
+	retrieved, err := repo.GetByToken(tenantID, "expired-token")
 
 	assert.Error(t, err)
 	assert.Nil(t, retrieved)
@@ -99,7 +106,9 @@ func TestOTPRepository_GetByToken_Used(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "used-token",
@@ -110,7 +119,7 @@ func TestOTPRepository_GetByToken_Used(t *testing.T) {
 	err := repo.Create(otp)
 	assert.NoError(t, err)
 
-	retrieved, err := repo.GetByToken("used-token")
+	retrieved, err := repo.GetByToken(tenantID, "used-token")
 
 	assert.Error(t, err)
 	assert.Nil(t, retrieved)
@@ -121,7 +130,9 @@ func TestOTPRepository_GetByEmailAndType_Success(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "token-123",
@@ -132,7 +143,7 @@ func TestOTPRepository_GetByEmailAndType_Success(t *testing.T) {
 	err := repo.Create(otp)
 	assert.NoError(t, err)
 
-	retrieved, err := repo.GetByEmailAndType("test@example.com", domain.OTPTypePasswordReset)
+	retrieved, err := repo.GetByEmailAndType(tenantID, "test@example.com", domain.OTPTypePasswordReset)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, retrieved)
@@ -144,10 +155,12 @@ func TestOTPRepository_GetByEmailAndType_ReturnsLatest(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	userID := uuid.New()
 
 	// Create older OTP
 	otp1 := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Email:     "test@example.com",
 		Token:     "old-token",
@@ -161,6 +174,7 @@ func TestOTPRepository_GetByEmailAndType_ReturnsLatest(t *testing.T) {
 
 	// Create newer OTP
 	otp2 := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Email:     "test@example.com",
 		Token:     "new-token",
@@ -170,7 +184,7 @@ func TestOTPRepository_GetByEmailAndType_ReturnsLatest(t *testing.T) {
 	}
 	repo.Create(otp2)
 
-	retrieved, err := repo.GetByEmailAndType("test@example.com", domain.OTPTypePasswordReset)
+	retrieved, err := repo.GetByEmailAndType(tenantID, "test@example.com", domain.OTPTypePasswordReset)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, retrieved)
@@ -182,7 +196,8 @@ func TestOTPRepository_GetByEmailAndType_NotFound(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
-	retrieved, err := repo.GetByEmailAndType("nonexistent@example.com", domain.OTPTypePasswordReset)
+	tenantID := uuid.New()
+	retrieved, err := repo.GetByEmailAndType(tenantID, "nonexistent@example.com", domain.OTPTypePasswordReset)
 
 	assert.Error(t, err)
 	assert.Nil(t, retrieved)
@@ -193,7 +208,9 @@ func TestOTPRepository_MarkAsUsed(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	otp := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "token-123",
@@ -204,12 +221,12 @@ func TestOTPRepository_MarkAsUsed(t *testing.T) {
 	err := repo.Create(otp)
 	assert.NoError(t, err)
 
-	err = repo.MarkAsUsed(otp.ID)
+	err = repo.MarkAsUsed(tenantID, otp.ID)
 
 	assert.NoError(t, err)
 
 	// Should not be able to retrieve it anymore
-	retrieved, err := repo.GetByToken("token-123")
+	retrieved, err := repo.GetByToken(tenantID, "token-123")
 	assert.Error(t, err)
 	assert.Nil(t, retrieved)
 }
@@ -219,8 +236,11 @@ func TestOTPRepository_DeleteExpired(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
+
 	// Create expired OTP
 	expiredOTP := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "expired-token",
@@ -232,6 +252,7 @@ func TestOTPRepository_DeleteExpired(t *testing.T) {
 
 	// Create valid OTP
 	validOTP := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    uuid.New(),
 		Email:     "test@example.com",
 		Token:     "valid-token",
@@ -246,11 +267,11 @@ func TestOTPRepository_DeleteExpired(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Expired OTP should not be retrievable
-	_, err = repo.GetByToken("expired-token")
+	_, err = repo.GetByToken(tenantID, "expired-token")
 	assert.Error(t, err)
 
 	// Valid OTP should still be retrievable
-	_, err = repo.GetByToken("valid-token")
+	_, err = repo.GetByToken(tenantID, "valid-token")
 	assert.NoError(t, err)
 }
 
@@ -259,10 +280,12 @@ func TestOTPRepository_DeleteByUserAndType(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	userID := uuid.New()
 
 	// Create OTP to delete
 	otp1 := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Email:     "test@example.com",
 		Token:     "token-1",
@@ -274,6 +297,7 @@ func TestOTPRepository_DeleteByUserAndType(t *testing.T) {
 
 	// Create OTP of different type (should not be deleted)
 	otp2 := &domain.OTP{
+		TenantID:  tenantID,
 		UserID:    userID,
 		Email:     "test@example.com",
 		Token:     "token-2",
@@ -283,16 +307,16 @@ func TestOTPRepository_DeleteByUserAndType(t *testing.T) {
 	}
 	repo.Create(otp2)
 
-	err := repo.DeleteByUserAndType(userID, domain.OTPTypePasswordReset)
+	err := repo.DeleteByUserAndType(tenantID, userID, domain.OTPTypePasswordReset)
 
 	assert.NoError(t, err)
 
 	// OTP of specified type should be deleted
-	_, err = repo.GetByToken("token-1")
+	_, err = repo.GetByToken(tenantID, "token-1")
 	assert.Error(t, err)
 
 	// OTP of different type should still exist
-	_, err = repo.GetByToken("token-2")
+	_, err = repo.GetByToken(tenantID, "token-2")
 	assert.NoError(t, err)
 }
 
@@ -301,6 +325,7 @@ func TestOTPRepository_MultipleTypes(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewOTPRepository(db)
 
+	tenantID := uuid.New()
 	userID := uuid.New()
 	email := "test@example.com"
 
@@ -314,6 +339,7 @@ func TestOTPRepository_MultipleTypes(t *testing.T) {
 
 	for _, otpType := range types {
 		otp := &domain.OTP{
+			TenantID:  tenantID,
 			UserID:    userID,
 			Email:     email,
 			Token:     string(otpType) + "-token",
@@ -327,7 +353,7 @@ func TestOTPRepository_MultipleTypes(t *testing.T) {
 
 	// Verify each type can be retrieved
 	for _, otpType := range types {
-		retrieved, err := repo.GetByEmailAndType(email, otpType)
+		retrieved, err := repo.GetByEmailAndType(tenantID, email, otpType)
 		assert.NoError(t, err)
 		assert.NotNil(t, retrieved)
 		assert.Equal(t, otpType, retrieved.Type)
